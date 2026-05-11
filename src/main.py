@@ -33,8 +33,17 @@ FACE_GONE_RESET_SEC     = OCCLUSION_THRESHOLD_SEC + 10
 
 # YOLO settings (optional). Nếu không cài ultralytics → bỏ qua, vẫn chạy được.
 YOLO_PERSON_CONF        = 0.35
-YOLO_RUN_EVERY_N_FRAMES = 5      # chạy cho đỡ nặng, ~6 FPS YOLO ở 30 FPS camera
-YOLO_CACHE_TTL_SEC      = 1.0    # cache kết quả YOLO trong khoảng này
+# Auto-throttle: nếu có CUDA, chạy YOLO mỗi 2 frame (~15 FPS); CPU thì mỗi 5
+# frame (~6 FPS). Có thể override qua env YOLO_EVERY.
+YOLO_RUN_EVERY_N_FRAMES = int(os.environ.get("YOLO_EVERY", "0")) or None
+YOLO_CACHE_TTL_SEC      = 1.0
+YOLO_DEVICE             = os.environ.get("YOLO_DEVICE", "auto")  # auto|cuda|cpu
+
+# Camera settings — MJPG cho FPS cao, buffer=1 cho latency thấp
+CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "0")
+CAMERA_WIDTH  = int(os.environ.get("CAMERA_WIDTH",  "1280"))
+CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT",  "720"))
+CAMERA_FPS    = int(os.environ.get("CAMERA_FPS",     "30"))
 
 PROJECT_ROOT     = Path(__file__).resolve().parent.parent
 EVENTS_DIR       = PROJECT_ROOT / "events"
@@ -152,18 +161,38 @@ class SmoothingBuffer:
         self.state = False
 
 
+def _resolve_yolo_device(requested: str) -> str:
+    """Auto-detect device. Trả về 'cuda:0' / 'cpu'."""
+    if requested == "cpu":
+        return "cpu"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda:0"
+    except Exception:
+        pass
+    if requested == "cuda":
+        print("⚠️  Yêu cầu cuda nhưng torch.cuda không available → fallback cpu")
+    return "cpu"
+
+
 class PersonDetector:
     """YOLO wrapper — phân biệt 'trẻ rời khung' và 'trẻ vẫn ở đó nhưng bị phủ kín'.
 
     Optional: nếu không cài ultralytics hoặc model không tồn tại → has_person()
     trả về None, state machine sẽ tự rơi về heuristic theo thời gian.
+
+    Tự dùng CUDA nếu có. Có thể ép qua env YOLO_DEVICE=cpu/cuda.
     """
 
     def __init__(self, model_path: Path):
-        self.model = None
-        self._last_call_t  = 0.0
-        self._last_result  = None  # type: bool | None
-        self._frame_count  = 0
+        self.model        = None
+        self.device       = "cpu"
+        self.run_every    = 5
+        self._last_call_t = 0.0
+        self._last_result = None  # type: bool | None
+        self._frame_count = 0
+
         try:
             from ultralytics import YOLO
         except Exception as e:
@@ -173,10 +202,19 @@ class PersonDetector:
             print(f"⚠️  Không thấy model {model_path.name}; YOLO bị tắt.")
             return
         try:
-            self.model = YOLO(str(model_path))
-            print(f"✅ YOLO sẵn sàng: {model_path.name}")
+            self.device = _resolve_yolo_device(YOLO_DEVICE)
+            self.model  = YOLO(str(model_path))
+            self.model.to(self.device)
+            # Throttle: nếu user override → dùng; không thì auto theo device
+            if YOLO_RUN_EVERY_N_FRAMES is not None:
+                self.run_every = YOLO_RUN_EVERY_N_FRAMES
+            else:
+                self.run_every = 2 if self.device.startswith("cuda") else 5
+            print(f"✅ YOLO sẵn sàng: {model_path.name} | "
+                  f"device={self.device} | run_every={self.run_every}")
         except Exception as e:
             print(f"⚠️  Lỗi load YOLO: {e}; YOLO bị tắt.")
+            self.model = None
 
     def has_person(self, frame) -> bool | None:
         """Trả về True/False/None. Throttle theo FPS + cache TTL."""
@@ -185,15 +223,15 @@ class PersonDetector:
         now = time.time()
         self._frame_count += 1
 
-        # Throttle: chỉ chạy mỗi N frame, hoặc nếu cache hết hạn
         cache_fresh = (self._last_result is not None
                        and now - self._last_call_t < YOLO_CACHE_TTL_SEC)
-        if (self._frame_count % YOLO_RUN_EVERY_N_FRAMES != 0) and cache_fresh:
+        if (self._frame_count % self.run_every != 0) and cache_fresh:
             return self._last_result
 
         try:
             results = self.model(
-                frame, classes=[0], conf=YOLO_PERSON_CONF, verbose=False
+                frame, classes=[0], conf=YOLO_PERSON_CONF,
+                device=self.device, verbose=False,
             )
             found = False
             for r in results:
@@ -376,12 +414,29 @@ class BabyMonitorV5:
 
     # ---------- Main loop ----------
     def run(self):
-        cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        # Camera source: int (USB index) hoặc string (RTSP URL / GStreamer pipeline)
+        src = int(CAMERA_SOURCE) if CAMERA_SOURCE.isdigit() else CAMERA_SOURCE
+        cap = cv2.VideoCapture(src)
+        if not cap.isOpened():
+            print(f"❌ Không mở được camera: {src}")
+            return
+
+        # MJPG → cho phép FPS cao ở 720p (YUYV thường giới hạn 10fps@720p)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAMERA_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS,          CAMERA_FPS)
+        # Buffer 1 → giảm latency, frame mới nhất luôn được đọc
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # Tắt autofocus — webcam baby monitor cần focus cố định
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+
+        actual_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
 
         print("🟢 Baby Monitor V5 - Histogram + State Machine + YOLO")
+        print(f"   Camera           : {src} → {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
         print(f"   Calibration      : {CALIBRATION_SEC}s")
         print(f"   Corr threshold   : {HIST_CORR_THRESHOLD}")
         print(f"   Cảnh báo sau     : {OCCLUSION_THRESHOLD_SEC}s")
