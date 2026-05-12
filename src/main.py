@@ -16,9 +16,29 @@ _NP_MAJOR = int(np.__version__.split('.')[0])
 if _NP_MAJOR >= 2:
     sys.exit(
         f"\n❌ NumPy {np.__version__} không tương thích với mediapipe 0.10.x.\n"
-        f"   Cài lại bản 1.x:\n"
-        f"     pip install 'numpy<2' --force-reinstall\n"
+        f"   Chạy 1 lệnh fix cả 2 lib cùng lúc:\n"
+        f"     python -m pip install 'numpy<2' 'opencv-python<4.11' --force-reinstall\n"
+        f"   Hoặc dùng helper:  bash scripts/fix_env.sh  (Linux/macOS)\n"
+        f"                       .\\scripts\\fix_env.ps1   (Windows)\n"
     )
+
+# Check opencv-python version VIA METADATA (không import cv2) — opencv-python>=4.11
+# compile chống NumPy 2.x, mismatch với numpy<2 → silent corruption hoặc crash.
+try:
+    from importlib.metadata import version as _pkg_ver
+    _cv_ver = _pkg_ver('opencv-python')
+    _cv_parts = _cv_ver.split('.')
+    _cv_major, _cv_minor = int(_cv_parts[0]), int(_cv_parts[1])
+    if _cv_major > 4 or (_cv_major == 4 and _cv_minor >= 11):
+        sys.exit(
+            f"\n❌ opencv-python {_cv_ver} compile chống NumPy 2.x, "
+            f"không khớp với numpy<2 đang cài.\n"
+            f"   Chạy 1 lệnh fix cả 2:\n"
+            f"     python -m pip install 'numpy<2' 'opencv-python<4.11' --force-reinstall\n"
+            f"   Hoặc helper:  bash scripts/fix_env.sh  /  .\\scripts\\fix_env.ps1\n"
+        )
+except Exception:
+    pass  # không cài qua pip (system package) → bỏ qua check
 
 import cv2
 import mediapipe as mp
