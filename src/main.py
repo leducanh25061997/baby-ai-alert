@@ -119,6 +119,28 @@ CAMERA_FPS    = int(os.environ.get("CAMERA_FPS",     "30"))
 
 HEADLESS = os.environ.get("HEADLESS", "0").lower() in ("1", "true", "yes")
 
+# Detection mode — chọn cách phát hiện che mũi/miệng:
+#   "multi_signal" (default): 4-signal voting (histogram + skin + edge + lap_var).
+#                  Có thể bị defeat bởi khăn có nếp / patterned blanket.
+#   "strict":      bỏ multi-signal, dùng face_mesh confidence cao (0.85). Khi
+#                  mặt bị che một phần → confidence drop → face_lost trigger
+#                  alert sau 15s. SAFETY-FIRST: nhiều false positive (mặt nghiêng,
+#                  ánh sáng kém) NHƯNG không miss khi thật sự bị che.
+DETECTION_MODE = os.environ.get("DETECTION_MODE", "multi_signal").lower()
+if DETECTION_MODE not in ("multi_signal", "strict"):
+    print(f"⚠️  DETECTION_MODE={DETECTION_MODE} không hợp lệ, fallback multi_signal")
+    DETECTION_MODE = "multi_signal"
+
+# Mediapipe confidence — strict mode dùng giá trị cao để dễ trigger face_lost
+MP_DETECTION_CONFIDENCE = (
+    0.85 if DETECTION_MODE == "strict"
+    else float(os.environ.get("MP_DETECTION_CONFIDENCE", "0.6"))
+)
+MP_TRACKING_CONFIDENCE = (
+    0.85 if DETECTION_MODE == "strict"
+    else float(os.environ.get("MP_TRACKING_CONFIDENCE", "0.6"))
+)
+
 PROJECT_ROOT    = Path(__file__).resolve().parent.parent
 EVENTS_DIR      = PROJECT_ROOT / "events"
 EVENTS_DIR.mkdir(exist_ok=True)
@@ -493,7 +515,11 @@ class BabyMonitorV5:
         actual_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
 
-        print("🟢 Baby Monitor V5 - Multi-Signal Detection")
+        print("🟢 Baby Monitor V5")
+        print(f"   Detection mode   : {DETECTION_MODE.upper()}")
+        if DETECTION_MODE == "strict":
+            print(f"   → Strict mode: KHÔNG dùng multi-signal voting.")
+            print(f"   → MediaPipe confidence cao ({MP_DETECTION_CONFIDENCE}) — face_lost trigger handle alert")
         print(f"   Camera           : {src} → {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
         print(f"   Calibration      : {CALIBRATION_SEC}s")
         print(f"   Cảnh báo sau     : {OCCLUSION_THRESHOLD_SEC}s")
@@ -505,7 +531,10 @@ class BabyMonitorV5:
         print("\n⏳ Đang load MediaPipe (lần đầu có thể mất 5-10s)...")
 
         calib_start = None
-        calib_done  = False
+        # Strict mode không cần calibration (không dùng multi-signal)
+        calib_done  = (DETECTION_MODE == "strict")
+        if calib_done:
+            print("ℹ️  STRICT mode — bỏ qua calibration phase.")
         fail_count  = 0
         MAX_FAILS   = 60
 
@@ -513,8 +542,8 @@ class BabyMonitorV5:
             with mp_face_mesh.FaceMesh(
                 max_num_faces=1,
                 refine_landmarks=True,
-                min_detection_confidence=0.6,
-                min_tracking_confidence=0.6
+                min_detection_confidence=MP_DETECTION_CONFIDENCE,
+                min_tracking_confidence=MP_TRACKING_CONFIDENCE,
             ) as face_mesh:
                 print("✅ MediaPipe sẵn sàng. Đang chờ mặt trẻ để calibrate...\n")
 
@@ -585,14 +614,22 @@ class BabyMonitorV5:
                         occluded_by_detector = False
                         if face_present:
                             lms = res.multi_face_landmarks[0].landmark
-                            check_result = self.detector.check(
-                                frame, lms, w, h,
-                                prev_in_alert=self._prev_in_alert,
-                            )
-                            if check_result is not None:
-                                occluded_by_detector = self.smoother.update(
-                                    check_result.occluded
+                            if DETECTION_MODE == "strict":
+                                # STRICT mode: bỏ multi-signal voting hoàn toàn.
+                                # Chỉ trust face_present từ mediapipe (high confidence).
+                                # Khi bị che → mediapipe drop face_present=False →
+                                # state machine's face_lost path alert sau 15s.
+                                check_result = None
+                                occluded_by_detector = False
+                            else:
+                                check_result = self.detector.check(
+                                    frame, lms, w, h,
+                                    prev_in_alert=self._prev_in_alert,
                                 )
+                                if check_result is not None:
+                                    occluded_by_detector = self.smoother.update(
+                                        check_result.occluded
+                                    )
                         else:
                             self.smoother.reset()
 

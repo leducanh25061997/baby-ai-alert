@@ -318,12 +318,29 @@ chmod 600 /opt/baby-monitor/.env   # bảo vệ token
 | `CAMERA_SOURCE` | `0` | `0`/`/dev/video0`/`rtsp://...` |
 | `CAMERA_WIDTH/HEIGHT/FPS` | 1280/720/30 | Giảm xuống 640/480/15 nếu OPi yếu |
 | `HEADLESS` | `0` | **Phải set `1` trên systemd** (không có X server) |
+| `DETECTION_MODE` | `multi_signal` | `multi_signal` (4-signal voting) hoặc `strict` (chỉ dùng face_mesh confidence cao 0.85) |
 | `OCCLUSION_THRESHOLD_SEC` | `15` | Ngưỡng giây để alert |
 | `CONFIRM_FRAMES` | `10` | Tăng → ổn định hơn, chậm hơn 0.3s |
 | `SMOOTHER_MAX_MISS` | `3` | Cho phép landmark jumpy 3 frame không reset đếm |
 | `AUTO_RECAL_AFTER_SEC` | `1800` | Auto-recalib sau 30 phút safe liên tục |
+| `MP_DETECTION_CONFIDENCE` | `0.6` | MediaPipe min detection confidence (chỉ áp dụng khi `multi_signal`; `strict` luôn dùng 0.85) |
+| `MP_TRACKING_CONFIDENCE` | `0.6` | MediaPipe min tracking confidence (tương tự) |
 | `YOLO_DEVICE` | `cpu` | `cuda` sau khi setup RKNN |
 | `YOLO_EVERY` | `5` | YOLO chạy mỗi 5 frame |
+
+### So sánh 2 detection modes
+
+| | `multi_signal` (default) | `strict` |
+|---|---|---|
+| **Cách hoạt động** | Vote 4 signal (hist + skin + edge + lap_var) trên patch mũi/miệng | MediaPipe confidence cao (0.85). Khi face bị che → mediapipe drop → face_lost trigger alert |
+| **Tốc độ** | ~6-12ms / frame extra (signal computation) | 0 extra (skip multi-signal) |
+| **Phụ thuộc calibration** | Có (5s calibrate baseline) | Không (skip calibration) |
+| **Chăn xám / gối** | ✅ detect tốt | ✅ detect tốt (mediapipe drop face) |
+| **Khăn trắng có nếp** | ❌ có thể bypass (nếp = texture) | ✅ detect tốt |
+| **Tay che mặt** | ⚠️ tùy điều kiện | ✅ detect tốt |
+| **Mặt nghiêng** | ✅ không false alert | ⚠️ có thể false alert |
+| **Ánh sáng yếu** | ✅ thường OK | ⚠️ có thể face_lost nhầm |
+| **Khi nào dùng** | Môi trường ổn định, ánh sáng tốt, cần accuracy cao | Production safety-first, chấp nhận false positive |
 
 > ⚠️ Đừng commit `.env` lên git. Thêm `.env` vào `.gitignore`.
 
