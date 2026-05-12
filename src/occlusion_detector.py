@@ -68,13 +68,11 @@ SKIN_DROP_FRAC           = 0.45
 EDGE_DROP_FRAC           = 0.30   # tighter
 LAPVAR_DROP_FRAC         = 0.50   # tighter — bị che = drop ≥ 50% variance
 
-# ABSOLUTE FLOORS — sanity-floor only, tránh pathological 0-value.
-# KHÔNG dùng làm threshold chính! Trong thực tế:
-#   - Adult face có lap_var ~10-30 (patch 70x70 trên vùng quanh môi/mũi)
-#   - Baby face có lap_var ~5-20 (skin mịn hơn)
-# Floor cao sẽ false-positive liên tục. Dùng relative drop là chính.
-EDGE_ABSOLUTE_FLOOR      = 0.002
-LAPVAR_ABSOLUTE_FLOOR    = 1.0
+# BỎ HOÀN TOÀN absolute floors — chúng gây false-positive khi baseline thấp.
+# Threshold giờ thuần adaptive theo baseline thực tế của user.
+# Nếu baseline edge=0, threshold=0, current 0 sẽ KHÔNG vote (tránh false +).
+EDGE_ABSOLUTE_FLOOR      = 0.0
+LAPVAR_ABSOLUTE_FLOOR    = 0.0
 
 # Conservative baseline update:
 BASELINE_UPDATE_CORR_MIN = 0.92    # chỉ update khi rất confident SAFE
