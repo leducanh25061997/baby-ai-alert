@@ -128,22 +128,33 @@ mp_face_mesh = mp.solutions.face_mesh
 
 
 class SmoothingBuffer:
-    """Temporal smoothing: chỉ chuyển trạng thái khi N frame liên tiếp đồng ý."""
+    """Temporal smoothing với tolerance — cho phép 1-2 frame miss vì:
+       - Mediapipe có thể jump landmark đôi khi
+       - Trẻ cử động làm patch nhảy 1 frame
+    Yêu cầu: ≥ (confirm - max_miss) trong window confirm gần nhất để CONFIRM.
+    """
 
-    def __init__(self, confirm=CONFIRM_FRAMES, clear=8):
-        self.buf     = []
-        self.confirm = confirm
-        self.clear   = clear
-        self.state   = False
+    def __init__(self, confirm=CONFIRM_FRAMES, clear=8, max_miss=2):
+        self.buf      = []
+        self.confirm  = confirm
+        self.clear    = clear
+        self.max_miss = max_miss   # cho phép 2 false trong 15 → vẫn confirm
+        self.state    = False
 
     def update(self, val: bool) -> bool:
         self.buf.append(val)
         if len(self.buf) > max(self.confirm, self.clear):
             self.buf.pop(0)
-        if len(self.buf) >= self.confirm and all(self.buf[-self.confirm:]):
-            self.state = True
-        if len(self.buf) >= self.clear and not any(self.buf[-self.clear:]):
-            self.state = False
+        # Confirm: ≥ (confirm - max_miss) trong window phải True
+        if len(self.buf) >= self.confirm:
+            recent_true = sum(self.buf[-self.confirm:])
+            if recent_true >= self.confirm - self.max_miss:
+                self.state = True
+        # Clear: ≤ max_miss True trong window clear → bỏ alert
+        if len(self.buf) >= self.clear:
+            recent_true = sum(self.buf[-self.clear:])
+            if recent_true <= self.max_miss:
+                self.state = False
         return self.state
 
     def reset(self):
@@ -279,6 +290,8 @@ class BabyMonitorV5:
                     "mouth_skin_ratio": float(result.mouth_skin_ratio),
                     "nose_edge_density": float(result.nose_edge_density),
                     "mouth_edge_density": float(result.mouth_edge_density),
+                    "nose_lap_var": float(result.nose_lap_var),
+                    "mouth_lap_var": float(result.mouth_lap_var),
                     "nose_votes": int(result.nose_votes_for_occluded),
                     "mouth_votes": int(result.mouth_votes_for_occluded),
                 })
@@ -309,14 +322,16 @@ class BabyMonitorV5:
             reason_block = "🫥 Mất hoàn toàn khuôn mặt — nghi bị phủ kín bởi vật lạ"
         elif result is not None:
             reason_block = (
-                f"👃 Mũi vote: `{result.nose_votes_for_occluded}/3`  "
+                f"👃 Mũi vote: `{result.nose_votes_for_occluded}/4`  "
                 f"hist=`{result.nose_hist_corr:.2f}` "
                 f"skin=`{result.nose_skin_ratio:.2f}` "
-                f"edge=`{result.nose_edge_density:.3f}`\n"
-                f"👄 Miệng vote: `{result.mouth_votes_for_occluded}/3`  "
+                f"edge=`{result.nose_edge_density:.3f}` "
+                f"lap=`{result.nose_lap_var:.0f}`\n"
+                f"👄 Miệng vote: `{result.mouth_votes_for_occluded}/4`  "
                 f"hist=`{result.mouth_hist_corr:.2f}` "
                 f"skin=`{result.mouth_skin_ratio:.2f}` "
-                f"edge=`{result.mouth_edge_density:.3f}`"
+                f"edge=`{result.mouth_edge_density:.3f}` "
+                f"lap=`{result.mouth_lap_var:.0f}`"
             )
         else:
             reason_block = "Phát hiện che mũi/miệng"
@@ -383,10 +398,10 @@ class BabyMonitorV5:
             cv2.rectangle(frame, (nx-half, ny-half), (nx+half, ny+half), n_color, 2)
             cv2.rectangle(frame, (mx-half, my-half), (mx+half, my+half), m_color, 2)
             if result:
-                cv2.putText(frame, f"N:{result.nose_votes_for_occluded}/3",
+                cv2.putText(frame, f"N:{result.nose_votes_for_occluded}/4",
                             (nx-half, ny-half-6), cv2.FONT_HERSHEY_SIMPLEX,
                             0.5, n_color, 1)
-                cv2.putText(frame, f"M:{result.mouth_votes_for_occluded}/3",
+                cv2.putText(frame, f"M:{result.mouth_votes_for_occluded}/4",
                             (mx-half, my-half-6), cv2.FONT_HERSHEY_SIMPLEX,
                             0.5, m_color, 1)
 
@@ -397,8 +412,8 @@ class BabyMonitorV5:
         )
         if result is not None:
             debug = [
-                f"NOSE  hist={result.nose_hist_corr:.2f}  skin={result.nose_skin_ratio:.2f}  edge={result.nose_edge_density:.3f}  V={result.nose_votes_for_occluded}/3",
-                f"MOUTH hist={result.mouth_hist_corr:.2f}  skin={result.mouth_skin_ratio:.2f}  edge={result.mouth_edge_density:.3f}  V={result.mouth_votes_for_occluded}/3",
+                f"NOSE  hist={result.nose_hist_corr:.2f}  skin={result.nose_skin_ratio:.2f}  edge={result.nose_edge_density:.3f}  lap={result.nose_lap_var:.0f}  V={result.nose_votes_for_occluded}/4",
+                f"MOUTH hist={result.mouth_hist_corr:.2f}  skin={result.mouth_skin_ratio:.2f}  edge={result.mouth_edge_density:.3f}  lap={result.mouth_lap_var:.0f}  V={result.mouth_votes_for_occluded}/4",
                 f"Quality:{self.detector.calibration_quality:.2f}  {person_label}  (R=recal)",
             ]
         else:

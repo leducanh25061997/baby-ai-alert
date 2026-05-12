@@ -70,7 +70,7 @@ def face_frame(seed=0, w=320, h=240, skin_jitter=0):
 
 
 def blanket_frame(w=320, h=240, color=(100, 100, 100)):
-    """Frame toàn màu xám đồng nhất — không skin, không edge."""
+    """Frame toàn màu xám đồng nhất — không skin, không edge, không texture."""
     f = np.full((h, w, 3), color, dtype=np.uint8)
     return f
 
@@ -81,34 +81,68 @@ def red_blanket_frame(w=320, h=240):
     return f
 
 
+def hand_frame(w=320, h=240):
+    """Tay back skin tone phủ kín — case BAY hardest:
+       - Skin tone giống mặt → histogram + skin signal đều OK
+       - Có ít texture (1-2 knuckle line) → edge density có thể qua threshold
+       - Laplacian variance phải thấp hơn mặt (vì uniform hơn) → trigger
+    """
+    f = np.full((h, w, 3), 35, dtype=np.uint8)
+    hand = np.full((140, 140, 3), (140, 170, 210), dtype=np.uint8)
+    # 1 knuckle line nhẹ — ít chi tiết hơn nhiều so với mặt (môi, mũi, lông)
+    cv2.line(hand, (40, 70), (100, 70), (135, 165, 205), 1)
+    f[50:190, 90:230] = hand
+    return f
+
+
 # ===================== tests =====================
 
 def test_compute_signals_basic():
-    """compute_signals trả về dict đúng key + giá trị hợp lý."""
+    """compute_signals trả về dict đúng key + giá trị hợp lý (4 signal)."""
     patch = face_frame()[50:190, 90:230]
     patch = cv2.resize(patch, (50, 50))
     sigs = compute_signals(patch)
-    assert 'hist' in sigs and 'skin_ratio' in sigs and 'edge_density' in sigs
+    assert {'hist', 'skin_ratio', 'edge_density', 'lap_var'} <= set(sigs.keys())
     assert sigs['hist'].shape == (36, 32)
     assert 0.0 <= sigs['skin_ratio'] <= 1.0
     assert 0.0 <= sigs['edge_density'] <= 1.0
-    # Face patch phải có skin_ratio cao
+    assert sigs['lap_var'] >= 0
     assert sigs['skin_ratio'] > 0.3, f"skin={sigs['skin_ratio']:.2f}, mong cao"
     print(f"✅ test_compute_signals_basic  (skin={sigs['skin_ratio']:.2f} "
-          f"edge={sigs['edge_density']:.3f})")
+          f"edge={sigs['edge_density']:.3f} lap={sigs['lap_var']:.0f})")
 
 
-def test_blanket_has_low_skin():
-    """Frame chăn đồng nhất phải có skin_ratio rất thấp."""
+def test_blanket_has_low_skin_and_low_lap_var():
+    """Chăn xám: skin ratio ≈ 0, edge ≈ 0, lap_var ≈ 0."""
     patch = blanket_frame()[50:100, 50:100]
     patch = cv2.resize(patch, (50, 50))
     sigs = compute_signals(patch)
-    assert sigs['skin_ratio'] < 0.05, \
-        f"Blanket có skin={sigs['skin_ratio']:.2f} — mong gần 0"
-    assert sigs['edge_density'] < 0.05, \
-        f"Blanket có edge={sigs['edge_density']:.3f} — mong gần 0"
-    print(f"✅ test_blanket_has_low_skin  (skin={sigs['skin_ratio']:.2f} "
-          f"edge={sigs['edge_density']:.3f})")
+    assert sigs['skin_ratio']   < 0.05
+    assert sigs['edge_density'] < 0.05
+    assert sigs['lap_var']      < 5.0, f"Blanket lap_var={sigs['lap_var']:.0f}"
+    print(f"✅ test_blanket_has_low_skin_and_low_lap_var  "
+          f"(skin={sigs['skin_ratio']:.2f} edge={sigs['edge_density']:.3f} "
+          f"lap={sigs['lap_var']:.0f})")
+
+
+def test_face_lap_var_higher_than_hand():
+    """Face patch (lip area) phải có lap_var cao hơn hand patch — đây là core
+    discriminator cho case tay che."""
+    face_patch = face_frame()[107:157, 135:185]  # mouth area
+    face_patch = cv2.resize(face_patch, (50, 50))
+    hand_patch = hand_frame()[107:157, 135:185]
+    hand_patch = cv2.resize(hand_patch, (50, 50))
+    face_lap = compute_signals(face_patch)['lap_var']
+    hand_lap = compute_signals(hand_patch)['lap_var']
+    assert face_lap > hand_lap, (
+        f"Face lap_var ({face_lap:.0f}) phải > hand lap_var ({hand_lap:.0f})"
+    )
+    ratio = face_lap / max(hand_lap, 1.0)
+    assert ratio > 1.5, (
+        f"Ratio face/hand={ratio:.2f} quá thấp — lap_var không discriminating"
+    )
+    print(f"✅ test_face_lap_var_higher_than_hand  "
+          f"(face={face_lap:.0f} hand={hand_lap:.0f} ratio={ratio:.1f}x)")
 
 
 def test_calibration_needs_enough_samples():
@@ -178,7 +212,7 @@ def test_check_on_same_frame_safe():
     assert result.nose_hist_corr  > 0.95
     assert result.mouth_hist_corr > 0.95
     print(f"✅ test_check_on_same_frame_safe  "
-          f"(votes={result.total_votes}/6 corr nose={result.nose_hist_corr:.2f} "
+          f"(votes={result.total_votes}/8 corr nose={result.nose_hist_corr:.2f} "
           f"mouth={result.mouth_hist_corr:.2f})")
 
 
@@ -198,17 +232,16 @@ def test_check_on_blanket_alerts():
     assert result is not None
     assert result.occluded, (
         f"Blanket phải occluded, "
-        f"got votes nose={result.nose_votes_for_occluded}/3 mouth={result.mouth_votes_for_occluded}/3"
+        f"got nose={result.nose_votes_for_occluded}/4 mouth={result.mouth_votes_for_occluded}/4"
     )
-    # Cả 2 patch nên có ≥2/3 vote
     assert result.nose_votes_for_occluded  >= 2
     assert result.mouth_votes_for_occluded >= 2
     print(f"✅ test_check_on_blanket_alerts  "
-          f"(nose={result.nose_votes_for_occluded}/3 mouth={result.mouth_votes_for_occluded}/3)")
+          f"(nose={result.nose_votes_for_occluded}/4 mouth={result.mouth_votes_for_occluded}/4)")
 
 
 def test_check_on_red_blanket_still_alerts():
-    """Edge case: chăn đỏ overlap với skin HSV range. Histogram + edge phải bù lại."""
+    """Edge case: chăn đỏ overlap với skin HSV range. Histogram + edge + lap_var bù lại."""
     det = OcclusionDetector()
     lms = make_landmarks()
     f_face = face_frame()
@@ -221,13 +254,47 @@ def test_check_on_red_blanket_still_alerts():
     f_red = red_blanket_frame(w=w_, h=h_)
     result = det.check(f_red, lms, w_, h_, prev_in_alert=False)
     assert result is not None
-    # Histogram chắc chắn rất khác, edge thấp → ít nhất 2/3 vote
     assert result.occluded, (
         f"Chăn đỏ phải occluded dù skin range overlap, "
-        f"got votes nose={result.nose_votes_for_occluded}/3 mouth={result.mouth_votes_for_occluded}/3"
+        f"got nose={result.nose_votes_for_occluded}/4 mouth={result.mouth_votes_for_occluded}/4"
     )
     print(f"✅ test_check_on_red_blanket_still_alerts  "
-          f"(nose={result.nose_votes_for_occluded}/3 mouth={result.mouth_votes_for_occluded}/3)")
+          f"(nose={result.nose_votes_for_occluded}/4 mouth={result.mouth_votes_for_occluded}/4)")
+
+
+def test_check_on_hand_alerts():
+    """KỊCH BẢN KHÓ NHẤT: tay che mặt — skin tone giống mặt nên histogram +
+    skin vote KHÔNG. Phải dựa vào edge density + Laplacian variance để alert.
+
+    Đây chính là bug user báo: tay che không cảnh báo. Test này verify đã fix.
+    """
+    det = OcclusionDetector()
+    lms = make_landmarks()
+    f_face = face_frame()
+    h_, w_ = f_face.shape[:2]
+    for _ in range(MIN_CALIB_SAMPLES + 5):
+        det.add_calibration_sample(f_face, lms, w_, h_)
+    ok, msg = det.finalize_calibration()
+    assert ok, msg
+
+    f_hand = hand_frame(w=w_, h=h_)
+    result = det.check(f_hand, lms, w_, h_, prev_in_alert=False)
+    assert result is not None
+    assert result.occluded, (
+        f"❌ Tay che mặt phải alert!\n"
+        f"   nose votes={result.nose_votes_for_occluded}/4 "
+        f"(hist={result.nose_hist_corr:.2f} skin={result.nose_skin_ratio:.2f} "
+        f"edge={result.nose_edge_density:.3f} lap={result.nose_lap_var:.0f}, "
+        f"baseline_lap={det.nose.lap_var:.0f} threshold={det.nose.lap_var_min:.0f})\n"
+        f"   mouth votes={result.mouth_votes_for_occluded}/4 "
+        f"(hist={result.mouth_hist_corr:.2f} skin={result.mouth_skin_ratio:.2f} "
+        f"edge={result.mouth_edge_density:.3f} lap={result.mouth_lap_var:.0f}, "
+        f"baseline_lap={det.mouth.lap_var:.0f} threshold={det.mouth.lap_var_min:.0f})"
+    )
+    print(f"✅ test_check_on_hand_alerts  "
+          f"(nose={result.nose_votes_for_occluded}/4 mouth={result.mouth_votes_for_occluded}/4 | "
+          f"face_lap nose={det.nose.lap_var:.0f} mouth={det.mouth.lap_var:.0f} | "
+          f"hand_lap nose={result.nose_lap_var:.0f} mouth={result.mouth_lap_var:.0f})")
 
 
 def test_reset_clears_state():
@@ -280,13 +347,15 @@ def test_baseline_does_not_update_in_alert():
 if __name__ == "__main__":
     tests = [
         test_compute_signals_basic,
-        test_blanket_has_low_skin,
+        test_blanket_has_low_skin_and_low_lap_var,
+        test_face_lap_var_higher_than_hand,
         test_calibration_needs_enough_samples,
         test_calibration_succeeds_on_stable_face,
         test_calibration_fails_on_blanket_landmark,
         test_check_on_same_frame_safe,
         test_check_on_blanket_alerts,
         test_check_on_red_blanket_still_alerts,
+        test_check_on_hand_alerts,
         test_reset_clears_state,
         test_check_returns_none_before_ready,
         test_baseline_does_not_update_in_alert,
