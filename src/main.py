@@ -22,23 +22,49 @@ if _NP_MAJOR >= 2:
         f"                       .\\scripts\\fix_env.ps1   (Windows)\n"
     )
 
-# Check opencv-python version VIA METADATA (không import cv2) — opencv-python>=4.11
-# compile chống NumPy 2.x, mismatch với numpy<2 → silent corruption hoặc crash.
+# Check opencv version VIA METADATA (không import cv2) — opencv >=4.11 compile
+# chống NumPy 2.x, mismatch với numpy<2 → silent corruption hoặc crash.
+# Phải check CẢ 4 variant vì share cv2 namespace.
 try:
-    from importlib.metadata import version as _pkg_ver
-    _cv_ver = _pkg_ver('opencv-python')
-    _cv_parts = _cv_ver.split('.')
-    _cv_major, _cv_minor = int(_cv_parts[0]), int(_cv_parts[1])
-    if _cv_major > 4 or (_cv_major == 4 and _cv_minor >= 11):
+    from importlib.metadata import version as _pkg_ver, PackageNotFoundError
+    _cv_pkg_names = [
+        'opencv-python', 'opencv-contrib-python',
+        'opencv-python-headless', 'opencv-contrib-python-headless',
+    ]
+    _bad_cv = []
+    _installed_cv = []
+    for _name in _cv_pkg_names:
+        try:
+            _cv_ver = _pkg_ver(_name)
+            _installed_cv.append((_name, _cv_ver))
+            _cv_parts = _cv_ver.split('.')
+            _cv_major, _cv_minor = int(_cv_parts[0]), int(_cv_parts[1])
+            if _cv_major > 4 or (_cv_major == 4 and _cv_minor >= 11):
+                _bad_cv.append(f"{_name}=={_cv_ver}")
+        except PackageNotFoundError:
+            continue
+    if _bad_cv:
         sys.exit(
-            f"\n❌ opencv-python {_cv_ver} compile chống NumPy 2.x, "
-            f"không khớp với numpy<2 đang cài.\n"
-            f"   Chạy 1 lệnh fix cả 2:\n"
-            f"     python -m pip install 'numpy<2' 'opencv-python<4.11' --force-reinstall\n"
-            f"   Hoặc helper:  bash scripts/fix_env.sh  /  .\\scripts\\fix_env.ps1\n"
+            f"\n❌ OpenCV variant compile chống NumPy 2.x, không khớp với "
+            f"numpy<2 đang cài:\n"
+            f"     {', '.join(_bad_cv)}\n\n"
+            f"   Fix triệt để (uninstall tất cả variant rồi cài đúng):\n"
+            f"     bash scripts/fix_env.sh           (Linux/macOS)\n"
+            f"     .\\scripts\\fix_env.ps1            (Windows)\n"
         )
+    if len(_installed_cv) > 1:
+        # Cài nhiều variant cùng lúc → share cv2 namespace → bug khó debug
+        sys.exit(
+            f"\n❌ Phát hiện nhiều opencv variant cài cùng lúc (xung đột cv2 "
+            f"namespace):\n"
+            + "\n".join(f"     {n}=={v}" for n, v in _installed_cv) +
+            f"\n\n   Fix: chạy scripts/fix_env.sh (uninstall hết rồi cài lại "
+            f"chỉ opencv-python).\n"
+        )
+except SystemExit:
+    raise
 except Exception:
-    pass  # không cài qua pip (system package) → bỏ qua check
+    pass  # không cài qua pip → bỏ qua check
 
 import cv2
 import mediapipe as mp

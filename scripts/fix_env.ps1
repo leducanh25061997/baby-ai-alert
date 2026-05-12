@@ -1,11 +1,11 @@
-# Fix moi truong: ep numpy<2 + opencv-python<4.11.
+# Fix moi truong numpy/opencv triet de.
 #
-# Ly do:
+# Van de:
 #   - mediapipe 0.10.x compile chong NumPy 1.x -> can numpy<2
-#   - opencv-python >=4.11 compile chong NumPy 2.x -> can opencv<4.11
-#   Ca 2 phai downgrade cung luc.
+#   - opencv-python(-contrib)(-headless) >=4.11 compile chong NumPy 2.x
+#   - 4 variant opencv share cv2 namespace, cai chung se xung dot.
 #
-# Idempotent.
+# Action: uninstall TAT CA 4 variant, cai lai opencv-python<4.11 + numpy<2.
 
 $ErrorActionPreference = "Stop"
 
@@ -18,38 +18,31 @@ if (Test-Path $venvActivate) {
 
 Write-Host ""
 Write-Host "=== Phien ban hien tai ==="
-$nv = (python -c "import numpy; print(numpy.__version__)" 2>$null)
-$cv = (python -c "import cv2; print(cv2.__version__)" 2>$null)
-if (-not $nv) { $nv = "(chua cai)" }
-if (-not $cv) { $cv = "(chua cai)" }
+$nv = (python -c "import numpy; print(numpy.__version__)" 2>$null); if (-not $nv) { $nv = "(chua cai)" }
+$cv = (python -c "import cv2; print(cv2.__version__)" 2>$null);    if (-not $cv) { $cv = "(chua cai)" }
 Write-Host "numpy   : $nv"
-Write-Host "opencv  : $cv"
+Write-Host "cv2     : $cv"
 
-$numpyOk  = $nv -match "^1\."
-$opencvOk = $false
-if ($cv -match "^4\.(\d+)\.") {
-    if ([int]$Matches[1] -lt 11) { $opencvOk = $true }
-}
+Write-Host ""
+Write-Host "=== Cac opencv package dang cai ==="
+$opencvPkgs = (python -m pip list 2>$null | Select-String -Pattern "opencv")
+if ($opencvPkgs) { Write-Host $opencvPkgs } else { Write-Host "(khong co)" }
 
-if ($numpyOk -and $opencvOk) {
-    Write-Host ""
-    Write-Host "numpy va opencv da dung version. Khong can fix."
-    exit 0
+Write-Host ""
+Write-Host "=== Buoc 1: Uninstall tat ca opencv variant ==="
+foreach ($pkg in @("opencv-python", "opencv-contrib-python", "opencv-python-headless", "opencv-contrib-python-headless")) {
+    python -m pip uninstall -y $pkg 2>$null
 }
 
 Write-Host ""
-Write-Host "=== Bat dau fix ==="
-Write-Host "Uninstall opencv-contrib-python (neu co)..."
-python -m pip uninstall -y opencv-contrib-python 2>$null
-
-Write-Host ""
-Write-Host "Reinstall numpy<2 + opencv-python<4.11..."
+Write-Host "=== Buoc 2: Cai numpy<2 + opencv-python<4.11 ==="
 python -m pip install "numpy<2" "opencv-python<4.11" --force-reinstall
 
 Write-Host ""
 Write-Host "=== Sau khi fix ==="
 python -c "import numpy; print('numpy   :', numpy.__version__)"
-python -c "import cv2;   print('opencv  :', cv2.__version__)"
+python -c "import cv2;   print('cv2     :', cv2.__version__)"
+python -m pip list 2>$null | Select-String -Pattern "opencv"
 
 Write-Host ""
 Write-Host "Xong. Chay: python src\main.py"
