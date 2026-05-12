@@ -43,7 +43,9 @@ MOUTH_CENTER = 14
 MOUTH_LANDMARK_INDICES = [13, 14, 17]   # upper lip top / mouth center / lower lip bottom
 NOSE_LANDMARK_INDICES  = [4]            # nose tip is enough (nhỏ hơn)
 
-PATCH_SIZE = 50
+PATCH_SIZE = 70   # tăng từ 50 → 70: patch lớn hơn → baseline có nhiều
+                  # facial detail hơn → discrimination tốt hơn + ít nhạy với
+                  # landmark drift
 
 # Skin tone HSV ranges. Hue wraps quanh 0/180 (red), cần 2 range.
 # Tone Á/Âu nằm hầu hết trong [H 0-25, S 30-180, V 60-255].
@@ -66,11 +68,13 @@ SKIN_DROP_FRAC           = 0.45
 EDGE_DROP_FRAC           = 0.30   # tighter
 LAPVAR_DROP_FRAC         = 0.50   # tighter — bị che = drop ≥ 50% variance
 
-# ABSOLUTE FLOORS — bảo đảm hand detection ổn định bất kể baseline thấp.
-# Nếu signal < floor → vote chắc chắn dù relative drop chưa đủ.
-# Giá trị calibrate cho real-world: hand back có lap_var ~10-60 / edge ~0.5-2%
-EDGE_ABSOLUTE_FLOOR      = 0.020   # 2% pixel có edge — hand thường 0.5-1.5%
-LAPVAR_ABSOLUTE_FLOOR    = 50.0    # hand thường 10-50, mặt thường 200+
+# ABSOLUTE FLOORS — sanity-floor only, tránh pathological 0-value.
+# KHÔNG dùng làm threshold chính! Trong thực tế:
+#   - Adult face có lap_var ~10-30 (patch 70x70 trên vùng quanh môi/mũi)
+#   - Baby face có lap_var ~5-20 (skin mịn hơn)
+# Floor cao sẽ false-positive liên tục. Dùng relative drop là chính.
+EDGE_ABSOLUTE_FLOOR      = 0.002
+LAPVAR_ABSOLUTE_FLOOR    = 1.0
 
 # Conservative baseline update:
 BASELINE_UPDATE_CORR_MIN = 0.92    # chỉ update khi rất confident SAFE

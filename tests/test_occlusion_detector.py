@@ -102,6 +102,21 @@ def hand_frame(w=320, h=240):
     return f
 
 
+def low_detail_face_frame(w=320, h=240):
+    """Mặt thật adult skin mịn với detail rất thấp — mô phỏng patch rơi vào
+    vùng cheek-skin có ít edge (real-world baseline edge~0.01-0.02, lap~10-30).
+
+    Mục đích: reproduce bug user gặp với face_baseline thấp + absolute floor
+    quá cao gây persistent false positive trên mặt sạch.
+    """
+    f = np.full((h, w, 3), 35, dtype=np.uint8)
+    face = np.full((140, 140, 3), (140, 170, 210), dtype=np.uint8)
+    # Chỉ 1 đường mảnh mô phỏng môi mờ — KHÔNG có nhiều detail như face_frame()
+    cv2.line(face, (50, 80), (90, 80), (130, 160, 200), 1)
+    f[50:190, 90:230] = face
+    return f
+
+
 # ===================== tests =====================
 
 def test_compute_signals_basic():
@@ -304,6 +319,39 @@ def test_check_on_hand_alerts():
           f"hand_lap nose={result.nose_lap_var:.0f} mouth={result.mouth_lap_var:.0f})")
 
 
+def test_low_detail_face_no_false_alert():
+    """REGRESSION: face baseline thấp (real-world adult) + absolute floor cao
+    → MỌI frame trên mặt sạch đều vote occluded → persistent false alert.
+
+    Test này verify rằng face có baseline edge~0.01 / lap~10-30 phải KHÔNG
+    bị nhầm thành occluded khi check trên frame y hệt.
+    """
+    det = OcclusionDetector()
+    lms = make_landmarks()
+    f = low_detail_face_frame()
+    h_, w_ = f.shape[:2]
+    for _ in range(MIN_CALIB_SAMPLES + 5):
+        det.add_calibration_sample(f, lms, w_, h_)
+    ok, msg = det.finalize_calibration()
+    assert ok, msg
+    # Check ngay frame y hệt → KHÔNG được alert
+    result = det.check(f, lms, w_, h_, prev_in_alert=False)
+    assert result is not None
+    assert not result.occluded, (
+        f"❌ Mặt sạch (low detail baseline) báo nhầm:\n"
+        f"   nose V={result.nose_votes_for_occluded}/4 "
+        f"(edge={result.nose_edge_density:.4f} thresh={det.nose.edge_min_density:.4f}, "
+        f"lap={result.nose_lap_var:.1f} thresh={det.nose.lap_var_min:.1f})\n"
+        f"   mouth V={result.mouth_votes_for_occluded}/4 "
+        f"(edge={result.mouth_edge_density:.4f} thresh={det.mouth.edge_min_density:.4f}, "
+        f"lap={result.mouth_lap_var:.1f} thresh={det.mouth.lap_var_min:.1f})"
+    )
+    print(f"✅ test_low_detail_face_no_false_alert  "
+          f"(baseline mouth edge={det.mouth.edge_density:.3f} lap={det.mouth.lap_var:.1f} | "
+          f"threshold edge={det.mouth.edge_min_density:.4f} lap={det.mouth.lap_var_min:.1f} | "
+          f"votes={result.total_votes}/8)")
+
+
 def test_hand_stability_under_landmark_drift():
     """Mô phỏng landmark drift (hand position thay đổi nhẹ giữa các frame) —
     detection PHẢI ổn định, không oscillate. Đây chính là bug user gặp:
@@ -406,6 +454,7 @@ if __name__ == "__main__":
         test_check_on_blanket_alerts,
         test_check_on_red_blanket_still_alerts,
         test_check_on_hand_alerts,
+        test_low_detail_face_no_false_alert,
         test_hand_stability_under_landmark_drift,
         test_reset_clears_state,
         test_check_returns_none_before_ready,

@@ -5,8 +5,8 @@ Báo cáo các test case đã viết và **đều PASS** tính đến lần ch�
 | Module | Số test | Pass | Fail |
 |---|:-:|:-:|:-:|
 | `tests/test_state_machine.py` | 11 | ✅ 11 | 0 |
-| `tests/test_occlusion_detector.py` | 14 | ✅ 14 | 0 |
-| **Tổng** | **25** | **25** | **0** |
+| `tests/test_occlusion_detector.py` | 15 | ✅ 15 | 0 |
+| **Tổng** | **26** | **26** | **0** |
 
 Lệnh chạy lại:
 ```bash
@@ -113,20 +113,25 @@ Test `OcclusionDetector` — multi-signal voting (4 signal: histogram + skin rat
 - `nose votes=3/4`, `mouth votes=3/4` → ≥2/4 → ALERT
 - `face_lap nose=2980 mouth=1701` vs `hand_lap nose=2 mouth=3` → lap_var discriminator rất mạnh
 
-### B.11 `test_hand_stability_under_landmark_drift` ⭐ ✅
+### B.11 `test_low_detail_face_no_false_alert` ⭐ ✅
+**Regression test cho bug "mặt sạch vẫn báo nhầm"**: real-world adult face có baseline edge ~0.012 / lap_var ~10-30 (thấp hơn nhiều so với synthetic). Với absolute floor cao (0.020 / 50), MỌI frame trên mặt sạch đều vote occluded → persistent false alert.
+**Fix**: hạ floor xuống 0.002 / 1.0 để relative drop dominate.
+**Output**: baseline edge=0.000 lap=5.3 (synthetic low-detail) → threshold edge=0.0020 lap=2.6 → votes=2/8 trải đều 2 patch → KHÔNG occluded ✓.
+
+### B.12 `test_hand_stability_under_landmark_drift` ⭐ ✅
 **Bug "đôi khi alert đôi khi không"**: mediapipe landmark nhảy khi tay che → patch sampling khác nhau → vote oscillate.
 **Test**: 9 vị trí landmark khác nhau (drift ±0.03 normalized ≈ ±10px).
 **Output**: `9/9 frame occluded = 100%` — multi-landmark sampling + MIN aggregation + absolute floor đảm bảo ổn định tuyệt đối.
 
-### B.12 `test_reset_clears_state` ✅
+### B.13 `test_reset_clears_state` ✅
 **Mục đích**: `reset()` đưa detector về trạng thái fresh — baseline xóa, quality = 0, không ready.
 **Coverage**: hỗ trợ recalibrate (hotkey `R` / SIGUSR1).
 
-### B.13 `test_check_returns_none_before_ready` ✅
+### B.14 `test_check_returns_none_before_ready` ✅
 **Mục đích**: `check()` trước khi calibrate → trả về `None` (không crash, không false alert).
 **Coverage**: edge case lúc startup.
 
-### B.14 `test_baseline_does_not_update_in_alert` ✅
+### B.15 `test_baseline_does_not_update_in_alert` ✅
 **Anti-drift test**: nếu `prev_in_alert=True`, baseline KHÔNG được EMA-update. Tránh baseline "học" trạng thái che thành ra coi là an toàn.
 **Coverage**: ngăn baseline drift sang trạng thái nhầm.
 
@@ -138,9 +143,10 @@ Test `OcclusionDetector` — multi-signal voting (4 signal: histogram + skin rat
 |---|---|
 | Mặt bị phủ kín, face_mesh mất tracking → không bao giờ alert | **A.4** `test_face_lost_critical_bug_fix` |
 | Tay che mặt → 3 signal cũ bị lừa skin tone → không alert | **B.10** `test_check_on_hand_alerts` |
-| "Đôi khi alert đôi khi không" do landmark drift | **B.11** `test_hand_stability_under_landmark_drift` |
+| **Mặt sạch nhưng alert liên tục (absolute floor quá cao)** | **B.11** `test_low_detail_face_no_false_alert` |
+| "Đôi khi alert đôi khi không" do landmark drift | **B.12** `test_hand_stability_under_landmark_drift` |
 | False positive khi calibrate kém (skin% thấp) | **B.6** `test_calibration_fails_on_blanket_landmark` |
-| Baseline drift sang trạng thái sai sau alert | **B.14** `test_baseline_does_not_update_in_alert` |
+| Baseline drift sang trạng thái sai sau alert | **B.15** `test_baseline_does_not_update_in_alert` |
 | Spam alert khi che kéo dài | **A.9** `test_alert_sent_flag_prevents_spam` |
 | Alert nhầm khi mặt vừa quay đi 1-2 giây | **A.5** `test_face_lost_briefly_then_returns_no_alert` |
 | Alert nhầm khi trẻ rời khung lâu | **A.6**, **A.7** |
@@ -162,9 +168,10 @@ Yêu cầu gốc: *"Camera liên tục xác nhận sự hiện diện của mũi
 | Phát hiện che kín hoàn toàn (mediapipe mất tracking) | A.4 (face_lost trigger) |
 | Phân biệt "trẻ rời khung" với "trẻ bị phủ" | A.7 (YOLO no-person reset), A.8 (YOLO person keeps counting) |
 | Không spam khi đã alert | A.9 |
-| Ổn định khi landmark mediapipe jumpy | B.11 (100% stability) |
+| **Không false-positive trên mặt sạch (low-detail baseline)** | **B.11** (low detail face) |
+| Ổn định khi landmark mediapipe jumpy | B.12 (100% stability) |
 | Calibration quality gate (refuse nếu baseline xấu) | B.4 (min samples), B.6 (skin% gate) |
-| Recalibration on demand | B.12 (reset clears state) |
+| Recalibration on demand | B.13 (reset clears state) |
 
 ---
 
@@ -177,7 +184,7 @@ PYTHONIOENCODING=utf-8 python tests/test_state_machine.py
 # 🎉 11/11 test PASS
 
 PYTHONIOENCODING=utf-8 python tests/test_occlusion_detector.py
-# 🎉 14/14 test PASS
+# 🎉 15/15 test PASS
 ```
 
 Nếu fail → chạy `bash scripts/fix_env.sh` để fix numpy/opencv version, sau đó chạy lại.
