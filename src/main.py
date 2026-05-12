@@ -1,7 +1,28 @@
+import sys
+# Đảm bảo print() ra ngay không bị buffer khi chạy dưới systemd.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+# === Fail-fast environment guard ===
+# Mediapipe 0.10.x compile chống NumPy 1.x → từ chối start nếu numpy>=2.
+try:
+    import numpy as np
+except ImportError:
+    sys.exit("❌ numpy chưa cài. Chạy: pip install -r requirements.txt")
+
+_NP_MAJOR = int(np.__version__.split('.')[0])
+if _NP_MAJOR >= 2:
+    sys.exit(
+        f"\n❌ NumPy {np.__version__} không tương thích với mediapipe 0.10.x.\n"
+        f"   Cài lại bản 1.x:\n"
+        f"     pip install 'numpy<2' --force-reinstall\n"
+    )
+
 import cv2
 import mediapipe as mp
-import numpy as np
-import time, asyncio, threading, io, json, os
+import time, asyncio, threading, io, json, os, signal
 from datetime import datetime
 from pathlib import Path
 from telegram import Bot
@@ -11,6 +32,10 @@ from state_machine import (
     STATE_ALERT, STATE_SAFE, STATE_NO_FACE, STATE_CALIBRATING,
     TRIGGER_FACE_LOST,
 )
+from occlusion_detector import (
+    OcclusionDetector, CheckResult,
+    NOSE_TIP, MOUTH_CENTER, PATCH_SIZE,
+)
 
 # ===================== CONFIG =====================
 TELEGRAM_TOKEN = os.environ.get(
@@ -19,127 +44,46 @@ TELEGRAM_TOKEN = os.environ.get(
 )
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7316578932")
 
-OCCLUSION_THRESHOLD_SEC = 15
-COOLDOWN_SEC            = 60
+OCCLUSION_THRESHOLD_SEC = int(os.environ.get("OCCLUSION_THRESHOLD_SEC", "15"))
+COOLDOWN_SEC            = int(os.environ.get("COOLDOWN_SEC",            "60"))
 
-CALIBRATION_SEC         = 5
-HIST_CORR_THRESHOLD     = 0.65
-CONFIRM_FRAMES          = 15
-BASELINE_UPDATE_RATE    = 0.01
-PATCH_SIZE              = 50
+CALIBRATION_SEC         = int(os.environ.get("CALIBRATION_SEC",         "5"))
+CONFIRM_FRAMES          = int(os.environ.get("CONFIRM_FRAMES",          "15"))
+MIN_QUALITY_WARN        = float(os.environ.get("MIN_QUALITY_WARN",      "0.5"))
 
 FACE_LOST_GRACE_SEC     = 1.5
 FACE_GONE_RESET_SEC     = OCCLUSION_THRESHOLD_SEC + 10
 
-# YOLO settings (optional). Nếu không cài ultralytics → bỏ qua, vẫn chạy được.
+# Auto re-calibrate sau khi safe liên tục bao lâu (giúp adapt môi trường đổi
+# dần). 0 = tắt. Default 30 phút.
+AUTO_RECAL_AFTER_SEC    = int(os.environ.get("AUTO_RECAL_AFTER_SEC", "1800"))
+
+# YOLO settings (optional)
 YOLO_PERSON_CONF        = 0.35
-# Auto-throttle: nếu có CUDA, chạy YOLO mỗi 2 frame (~15 FPS); CPU thì mỗi 5
-# frame (~6 FPS). Có thể override qua env YOLO_EVERY.
 YOLO_RUN_EVERY_N_FRAMES = int(os.environ.get("YOLO_EVERY", "0")) or None
 YOLO_CACHE_TTL_SEC      = 1.0
-YOLO_DEVICE             = os.environ.get("YOLO_DEVICE", "auto")  # auto|cuda|cpu
+YOLO_DEVICE             = os.environ.get("YOLO_DEVICE", "auto")
 
-# Camera settings — MJPG cho FPS cao, buffer=1 cho latency thấp
+# Camera
 CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "0")
 CAMERA_WIDTH  = int(os.environ.get("CAMERA_WIDTH",  "1280"))
 CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT",  "720"))
 CAMERA_FPS    = int(os.environ.get("CAMERA_FPS",     "30"))
 
-PROJECT_ROOT     = Path(__file__).resolve().parent.parent
-EVENTS_DIR       = PROJECT_ROOT / "events"
+HEADLESS = os.environ.get("HEADLESS", "0").lower() in ("1", "true", "yes")
+
+PROJECT_ROOT    = Path(__file__).resolve().parent.parent
+EVENTS_DIR      = PROJECT_ROOT / "events"
 EVENTS_DIR.mkdir(exist_ok=True)
-YOLO_MODEL_PATH  = PROJECT_ROOT / "yolov8n.pt"
+YOLO_MODEL_PATH = PROJECT_ROOT / "yolov8n.pt"
 # ==================================================
 
 mp_face_mesh = mp.solutions.face_mesh
 
-NOSE_TIP     = 4
-MOUTH_CENTER = 14
-
-
-def extract_patch(frame, landmark, w, h, size=PATCH_SIZE):
-    x = int(np.clip(landmark.x * w, 0, w - 1))
-    y = int(np.clip(landmark.y * h, 0, h - 1))
-    half = size // 2
-    x1, y1 = max(0, x - half), max(0, y - half)
-    x2, y2 = min(w, x + half), min(h, y + half)
-    patch = frame[y1:y2, x1:x2]
-    if patch.size == 0:
-        return None
-    return cv2.resize(patch, (size, size))
-
-
-def calc_histogram(patch):
-    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([hsv], [0, 1], None, [36, 32], [0, 180, 0, 256])
-    cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
-    return hist
-
-
-def histogram_correlation(h1, h2):
-    return cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL)
-
-
-class BaselineManager:
-    def __init__(self):
-        self.nose_hist      = None
-        self.mouth_hist     = None
-        self.is_ready       = False
-        self._samples_nose  = []
-        self._samples_mouth = []
-
-    def add_calibration_sample(self, frame, landmarks, w, h):
-        nose_patch  = extract_patch(frame, landmarks[NOSE_TIP],    w, h)
-        mouth_patch = extract_patch(frame, landmarks[MOUTH_CENTER], w, h)
-        if nose_patch is not None:
-            self._samples_nose.append(calc_histogram(nose_patch))
-        if mouth_patch is not None:
-            self._samples_mouth.append(calc_histogram(mouth_patch))
-
-    def finalize_calibration(self):
-        if not self._samples_nose or not self._samples_mouth:
-            return False
-        self.nose_hist  = np.mean(self._samples_nose,  axis=0).astype(np.float32)
-        self.mouth_hist = np.mean(self._samples_mouth, axis=0).astype(np.float32)
-        self.is_ready   = True
-        return True
-
-    def update(self, frame, landmarks, w, h):
-        if not self.is_ready:
-            return
-        nose_patch  = extract_patch(frame, landmarks[NOSE_TIP],    w, h)
-        mouth_patch = extract_patch(frame, landmarks[MOUTH_CENTER], w, h)
-        if nose_patch is not None:
-            curr_hist = calc_histogram(nose_patch).astype(np.float32)
-            self.nose_hist = ((1 - BASELINE_UPDATE_RATE) * self.nose_hist
-                              + BASELINE_UPDATE_RATE * curr_hist)
-        if mouth_patch is not None:
-            curr_hist = calc_histogram(mouth_patch).astype(np.float32)
-            self.mouth_hist = ((1 - BASELINE_UPDATE_RATE) * self.mouth_hist
-                               + BASELINE_UPDATE_RATE * curr_hist)
-
-    def check_occlusion(self, frame, landmarks, w, h):
-        if not self.is_ready:
-            return False, 1.0, 1.0
-        nose_patch  = extract_patch(frame, landmarks[NOSE_TIP],    w, h)
-        mouth_patch = extract_patch(frame, landmarks[MOUTH_CENTER], w, h)
-        if nose_patch is None or mouth_patch is None:
-            return False, 1.0, 1.0
-        nose_corr  = histogram_correlation(
-            calc_histogram(nose_patch).astype(np.float32),
-            self.nose_hist
-        )
-        mouth_corr = histogram_correlation(
-            calc_histogram(mouth_patch).astype(np.float32),
-            self.mouth_hist
-        )
-        nose_occ  = nose_corr  < HIST_CORR_THRESHOLD
-        mouth_occ = mouth_corr < HIST_CORR_THRESHOLD
-        # OR-logic: chỉ một bên bị che cũng đáng lo
-        return nose_occ or mouth_occ, nose_corr, mouth_corr
-
 
 class SmoothingBuffer:
+    """Temporal smoothing: chỉ chuyển trạng thái khi N frame liên tiếp đồng ý."""
+
     def __init__(self, confirm=CONFIRM_FRAMES, clear=8):
         self.buf     = []
         self.confirm = confirm
@@ -162,7 +106,6 @@ class SmoothingBuffer:
 
 
 def _resolve_yolo_device(requested: str) -> str:
-    """Auto-detect device. Trả về 'cuda:0' / 'cpu'."""
     if requested == "cpu":
         return "cpu"
     try:
@@ -172,25 +115,19 @@ def _resolve_yolo_device(requested: str) -> str:
     except Exception:
         pass
     if requested == "cuda":
-        print("⚠️  Yêu cầu cuda nhưng torch.cuda không available → fallback cpu")
+        print("⚠️  YOLO_DEVICE=cuda nhưng torch.cuda không available → fallback cpu")
     return "cpu"
 
 
 class PersonDetector:
-    """YOLO wrapper — phân biệt 'trẻ rời khung' và 'trẻ vẫn ở đó nhưng bị phủ kín'.
-
-    Optional: nếu không cài ultralytics hoặc model không tồn tại → has_person()
-    trả về None, state machine sẽ tự rơi về heuristic theo thời gian.
-
-    Tự dùng CUDA nếu có. Có thể ép qua env YOLO_DEVICE=cpu/cuda.
-    """
+    """YOLO wrapper — chỉ dùng khi mất mặt để phân biệt 'rời khung' vs 'bị phủ'."""
 
     def __init__(self, model_path: Path):
         self.model        = None
         self.device       = "cpu"
         self.run_every    = 5
         self._last_call_t = 0.0
-        self._last_result = None  # type: bool | None
+        self._last_result = None
         self._frame_count = 0
 
         try:
@@ -205,7 +142,6 @@ class PersonDetector:
             self.device = _resolve_yolo_device(YOLO_DEVICE)
             self.model  = YOLO(str(model_path))
             self.model.to(self.device)
-            # Throttle: nếu user override → dùng; không thì auto theo device
             if YOLO_RUN_EVERY_N_FRAMES is not None:
                 self.run_every = YOLO_RUN_EVERY_N_FRAMES
             else:
@@ -216,11 +152,10 @@ class PersonDetector:
             print(f"⚠️  Lỗi load YOLO: {e}; YOLO bị tắt.")
             self.model = None
 
-    def has_person(self, frame) -> bool | None:
-        """Trả về True/False/None. Throttle theo FPS + cache TTL."""
+    def has_person(self, frame):
         if self.model is None:
             return None
-        now = time.time()
+        now = time.monotonic()
         self._frame_count += 1
 
         cache_fresh = (self._last_result is not None
@@ -249,7 +184,7 @@ class PersonDetector:
 class BabyMonitorV5:
     def __init__(self):
         self.bot             = Bot(token=TELEGRAM_TOKEN)
-        self.baseline        = BaselineManager()
+        self.detector        = OcclusionDetector()
         self.smoother        = SmoothingBuffer()
         self.person_detector = PersonDetector(YOLO_MODEL_PATH)
         self.fsm             = OcclusionStateMachine(
@@ -258,25 +193,53 @@ class BabyMonitorV5:
             gone_reset_sec = FACE_GONE_RESET_SEC,
         )
         self.last_alert_time = 0.0
+        self._prev_in_alert  = False
+        # Trigger để recalibrate (set bởi 'R' hotkey hoặc SIGUSR1).
+        self._recal_request  = threading.Event()
+        # Theo dõi để auto-recalibrate khi safe lâu.
+        self._safe_streak_start = None
+
+        self._shutdown = threading.Event()
+        try:
+            signal.signal(signal.SIGTERM, lambda *_: self._shutdown.set())
+            signal.signal(signal.SIGINT,  lambda *_: self._shutdown.set())
+            # SIGUSR1 chỉ có trên Unix → trigger recalibrate qua `kill -USR1 <pid>`
+            if hasattr(signal, "SIGUSR1"):
+                signal.signal(signal.SIGUSR1,
+                              lambda *_: self._recal_request.set())
+        except ValueError:
+            pass
 
     # ---------- Event persistence ----------
-    def _save_event(self, frame, status, nose_corr, mouth_corr, trigger):
+    def _save_event(self, frame, status, result, trigger):
         ts_file = datetime.now().strftime("%Y%m%d_%H%M%S")
         ts_iso  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             jpg_path  = EVENTS_DIR / f"possible_suffocation_risk_{ts_file}.jpg"
             json_path = EVENTS_DIR / f"possible_suffocation_risk_{ts_file}.json"
             cv2.imwrite(str(jpg_path), frame)
+            extra = {
+                "status": status,
+                "alert_seconds": OCCLUSION_THRESHOLD_SEC,
+                "trigger": trigger,
+                "calibration_quality": self.detector.calibration_quality,
+            }
+            if result is not None:
+                # Giữ tên 'upper'/'lower' cho khớp schema cũ
+                extra.update({
+                    "upper_score": float(result.nose_hist_corr),
+                    "lower_score": float(result.mouth_hist_corr),
+                    "nose_skin_ratio": float(result.nose_skin_ratio),
+                    "mouth_skin_ratio": float(result.mouth_skin_ratio),
+                    "nose_edge_density": float(result.nose_edge_density),
+                    "mouth_edge_density": float(result.mouth_edge_density),
+                    "nose_votes": int(result.nose_votes_for_occluded),
+                    "mouth_votes": int(result.mouth_votes_for_occluded),
+                })
             payload = {
                 "event_type": "possible_suffocation_risk",
                 "time": ts_iso,
-                "extra": {
-                    "status": status,
-                    "lower_score": float(mouth_corr),
-                    "upper_score": float(nose_corr),
-                    "alert_seconds": OCCLUSION_THRESHOLD_SEC,
-                    "trigger": trigger,
-                },
+                "extra": extra,
             }
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -285,8 +248,8 @@ class BabyMonitorV5:
             print(f"❌ Lỗi lưu event: {e}")
 
     # ---------- Telegram alert ----------
-    async def send_alert(self, frame, elapsed, nose_corr, mouth_corr, trigger):
-        now = time.time()
+    async def send_alert(self, frame, elapsed, result, trigger):
+        now = time.monotonic()
         if now - self.last_alert_time < COOLDOWN_SEC:
             return
         self.last_alert_time = now
@@ -298,12 +261,19 @@ class BabyMonitorV5:
 
         if trigger == TRIGGER_FACE_LOST:
             reason_block = "🫥 Mất hoàn toàn khuôn mặt — nghi bị phủ kín bởi vật lạ"
-        else:
+        elif result is not None:
             reason_block = (
-                f"👃 Mũi correlation: `{nose_corr:.3f}`\n"
-                f"👄 Miệng correlation: `{mouth_corr:.3f}`\n"
-                f"📏 Ngưỡng: `{HIST_CORR_THRESHOLD}`"
+                f"👃 Mũi vote: `{result.nose_votes_for_occluded}/3`  "
+                f"hist=`{result.nose_hist_corr:.2f}` "
+                f"skin=`{result.nose_skin_ratio:.2f}` "
+                f"edge=`{result.nose_edge_density:.3f}`\n"
+                f"👄 Miệng vote: `{result.mouth_votes_for_occluded}/3`  "
+                f"hist=`{result.mouth_hist_corr:.2f}` "
+                f"skin=`{result.mouth_skin_ratio:.2f}` "
+                f"edge=`{result.mouth_edge_density:.3f}`"
             )
+        else:
+            reason_block = "Phát hiện che mũi/miệng"
 
         caption = (
             f"🚨 *CẢNH BÁO NGẠT THỞ!*\n\n"
@@ -323,50 +293,77 @@ class BabyMonitorV5:
         except Exception as e:
             print(f"❌ Lỗi Telegram: {e}")
 
-    def _dispatch_alert(self, frame, elapsed, nose_corr, mouth_corr, trigger):
+    def _dispatch_alert(self, frame, elapsed, result, trigger):
         status = ("FULLY_COVERED" if trigger == TRIGGER_FACE_LOST
                   else "POSSIBLE_OCCLUSION")
         snap = frame.copy()
-        self._save_event(snap, status, nose_corr, mouth_corr, trigger)
+        self._save_event(snap, status, result, trigger)
         threading.Thread(
             target=lambda: asyncio.run(
-                self.send_alert(snap, elapsed, nose_corr, mouth_corr, trigger)
+                self.send_alert(snap, elapsed, result, trigger)
             ), daemon=True
         ).start()
 
-    # ---------- UI ----------
-    def draw_ui(self, frame, landmarks, state, elapsed,
-                face_present, nose_corr, mouth_corr,
-                calib_remaining, w, h, trigger="", person_seen=None):
+    def _request_recalibrate(self, reason: str):
+        print(f"🔄 Yêu cầu recalibrate: {reason}")
+        self._recal_request.set()
 
-        if landmarks and face_present and self.baseline.is_ready:
+    def _do_recalibrate(self):
+        """Reset toàn bộ state để vào lại CALIBRATING."""
+        self.detector.reset()
+        self.smoother.reset()
+        self.fsm._reset()   # noqa
+        self.fsm.last_face_seen = None
+        self._safe_streak_start = None
+        self._recal_request.clear()
+        print("🔄 Đã reset — sẽ calibrate lại khi thấy mặt.\n")
+
+    # ---------- UI ----------
+    def draw_ui(self, frame, landmarks, state, elapsed, face_present,
+                result, calib_remaining, w, h, trigger="", person_seen=None):
+
+        # Draw landmark patches
+        if landmarks and face_present and self.detector.is_ready:
             nose_lm  = landmarks[NOSE_TIP]
             mouth_lm = landmarks[MOUTH_CENTER]
-            nose_c  = (0,0,255) if nose_corr  < HIST_CORR_THRESHOLD else (0,255,0)
-            mouth_c = (0,0,255) if mouth_corr < HIST_CORR_THRESHOLD else (0,255,0)
+            # Màu patch: đỏ nếu vote ≥2, vàng nếu vote=1, xanh nếu vote=0
+            def vote_color(v):
+                return (0,0,255) if v >= 2 else ((0,200,255) if v == 1 else (0,255,0))
+            n_color = vote_color(result.nose_votes_for_occluded  if result else 0)
+            m_color = vote_color(result.mouth_votes_for_occluded if result else 0)
             half = PATCH_SIZE // 2
             nx = int(nose_lm.x * w);  ny = int(nose_lm.y * h)
             mx = int(mouth_lm.x * w); my = int(mouth_lm.y * h)
-            cv2.rectangle(frame, (nx-half, ny-half), (nx+half, ny+half), nose_c, 2)
-            cv2.putText(frame, f"Mui {nose_corr:.2f}", (nx-half, ny-half-6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, nose_c, 1)
-            cv2.rectangle(frame, (mx-half, my-half), (mx+half, my+half), mouth_c, 2)
-            cv2.putText(frame, f"Mieng {mouth_corr:.2f}", (mx-half, my-half-6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, mouth_c, 1)
+            cv2.rectangle(frame, (nx-half, ny-half), (nx+half, ny+half), n_color, 2)
+            cv2.rectangle(frame, (mx-half, my-half), (mx+half, my+half), m_color, 2)
+            if result:
+                cv2.putText(frame, f"N:{result.nose_votes_for_occluded}/3",
+                            (nx-half, ny-half-6), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, n_color, 1)
+                cv2.putText(frame, f"M:{result.mouth_votes_for_occluded}/3",
+                            (mx-half, my-half-6), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, m_color, 1)
 
         person_label = (
-            "YOLO: nguoi" if person_seen is True
-            else "YOLO: khong nguoi" if person_seen is False
-            else "YOLO: off"
+            "YOLO:nguoi" if person_seen is True
+            else "YOLO:vang" if person_seen is False
+            else "YOLO:off"
         )
-        debug = [
-            f"Mui   corr: {nose_corr:.3f}  {'BI CHE' if nose_corr  < HIST_CORR_THRESHOLD else 'OK'}",
-            f"Mieng corr: {mouth_corr:.3f}  {'BI CHE' if mouth_corr < HIST_CORR_THRESHOLD else 'OK'}",
-            f"Nguong: {HIST_CORR_THRESHOLD}  | {person_label}",
-        ]
+        if result is not None:
+            debug = [
+                f"NOSE  hist={result.nose_hist_corr:.2f}  skin={result.nose_skin_ratio:.2f}  edge={result.nose_edge_density:.3f}  V={result.nose_votes_for_occluded}/3",
+                f"MOUTH hist={result.mouth_hist_corr:.2f}  skin={result.mouth_skin_ratio:.2f}  edge={result.mouth_edge_density:.3f}  V={result.mouth_votes_for_occluded}/3",
+                f"Quality:{self.detector.calibration_quality:.2f}  {person_label}  (R=recal)",
+            ]
+        else:
+            debug = [
+                f"Detector chua ready  {person_label}",
+                "",
+                "(R=recal)",
+            ]
         for i, line in enumerate(debug):
-            cv2.putText(frame, line, (10, 50 + i * 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 200, 255), 1)
+            cv2.putText(frame, line, (10, 50 + i * 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 200, 255), 1)
 
         if state == STATE_ALERT:
             cv2.rectangle(frame, (0,0), (w-1,h-1), (0,0,220), 6)
@@ -394,7 +391,10 @@ class BabyMonitorV5:
                         (10, h-10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0,60,255), 2)
         else:
-            msg   = "Binh thuong - Mui/mieng dang nhin thay"
+            quality_warn = ""
+            if self.detector.is_ready and self.detector.calibration_quality < MIN_QUALITY_WARN:
+                quality_warn = f"  [Q={self.detector.calibration_quality:.2f} thap — nhan R de recalib]"
+            msg   = "Binh thuong - Mui/mieng dang nhin thay" + quality_warn
             color = (0, 220, 0)
 
         cv2.putText(frame, msg, (10, h-35 if state == STATE_ALERT else h-25),
@@ -414,140 +414,184 @@ class BabyMonitorV5:
 
     # ---------- Main loop ----------
     def run(self):
-        # Camera source: int (USB index) hoặc string (RTSP URL / GStreamer pipeline)
         src = int(CAMERA_SOURCE) if CAMERA_SOURCE.isdigit() else CAMERA_SOURCE
         cap = cv2.VideoCapture(src)
         if not cap.isOpened():
             print(f"❌ Không mở được camera: {src}")
             return
 
-        # MJPG → cho phép FPS cao ở 720p (YUYV thường giới hạn 10fps@720p)
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS,          CAMERA_FPS)
-        # Buffer 1 → giảm latency, frame mới nhất luôn được đọc
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        # Tắt autofocus — webcam baby monitor cần focus cố định
-        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+        cap.set(cv2.CAP_PROP_AUTOFOCUS,    0)
 
         actual_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
 
-        print("🟢 Baby Monitor V5 - Histogram + State Machine + YOLO")
+        print("🟢 Baby Monitor V5 - Multi-Signal Detection")
         print(f"   Camera           : {src} → {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
         print(f"   Calibration      : {CALIBRATION_SEC}s")
-        print(f"   Corr threshold   : {HIST_CORR_THRESHOLD}")
         print(f"   Cảnh báo sau     : {OCCLUSION_THRESHOLD_SEC}s")
+        print(f"   Auto-recal       : sau {AUTO_RECAL_AFTER_SEC}s safe liên tục"
+              if AUTO_RECAL_AFTER_SEC > 0 else "   Auto-recal       : tắt")
         print(f"   Events lưu tại   : {EVENTS_DIR}")
-        print("\n⏳ Đang chờ mặt trẻ để calibrate...\n")
+        print(f"   Headless         : {HEADLESS}")
+        print(f"   Recal manual     : nhấn R (GUI) hoặc `kill -USR1 <pid>` (headless)")
+        print("\n⏳ Đang load MediaPipe (lần đầu có thể mất 5-10s)...")
 
         calib_start = None
         calib_done  = False
-        nose_corr   = 1.0
-        mouth_corr  = 1.0
+        fail_count  = 0
+        MAX_FAILS   = 60
 
-        with mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.6
-        ) as face_mesh:
+        try:
+            with mp_face_mesh.FaceMesh(
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.6,
+                min_tracking_confidence=0.6
+            ) as face_mesh:
+                print("✅ MediaPipe sẵn sàng. Đang chờ mặt trẻ để calibrate...\n")
 
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
+                while not self._shutdown.is_set() and cap.isOpened():
+                    # === Recalibrate trigger ===
+                    if self._recal_request.is_set():
+                        self._do_recalibrate()
+                        calib_start = None
+                        calib_done  = False
 
-                h, w  = frame.shape[:2]
-                now   = time.time()
-                rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                res   = face_mesh.process(rgb)
-                face_present = bool(res.multi_face_landmarks)
+                    ret, frame = cap.read()
+                    if not ret:
+                        fail_count += 1
+                        if fail_count >= MAX_FAILS:
+                            print(f"❌ Mất camera {fail_count} frame → thoát")
+                            break
+                        time.sleep(0.05)
+                        continue
+                    fail_count = 0
 
-                state           = STATE_NO_FACE
-                calib_remaining = 0.0
-                elapsed         = 0.0
-                trigger         = ""
-                person_seen     = None
+                    h, w  = frame.shape[:2]
+                    now   = time.monotonic()
+                    rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    res   = face_mesh.process(rgb)
+                    face_present = bool(res.multi_face_landmarks)
 
-                # YOLO chỉ chạy khi đã calib xong VÀ không thấy mặt — tiết kiệm CPU
-                # và chỉ cần khi ta cần phân biệt 'rời khung' vs 'bị phủ'.
-                if calib_done and not face_present:
-                    person_seen = self.person_detector.has_person(frame)
+                    state           = STATE_NO_FACE
+                    calib_remaining = 0.0
+                    elapsed         = 0.0
+                    trigger         = ""
+                    person_seen     = None
+                    check_result: CheckResult | None = None
 
-                if face_present and not calib_done:
-                    # --- Giai đoạn calibration ---
-                    lms = res.multi_face_landmarks[0].landmark
-                    if calib_start is None:
-                        calib_start = now
-                        print("✅ Phát hiện mặt! Đang calibrate baseline...")
-                    calib_remaining = max(0, CALIBRATION_SEC - (now - calib_start))
-                    self.baseline.add_calibration_sample(frame, lms, w, h)
-                    if now - calib_start >= CALIBRATION_SEC:
-                        if self.baseline.finalize_calibration():
-                            calib_done = True
-                            print("✅ Calibration xong! Bắt đầu giám sát.\n")
-                        else:
-                            calib_start = None
-                    state = STATE_CALIBRATING
+                    if calib_done and not face_present:
+                        person_seen = self.person_detector.has_person(frame)
 
-                elif not face_present and not calib_done:
-                    # Chưa calibrate, vẫn chờ thấy mặt
-                    calib_start = None
-                    state = STATE_NO_FACE
-
-                else:
-                    # --- Giai đoạn giám sát ---
-                    occluded_by_hist = False
-                    if face_present:
+                    if face_present and not calib_done:
+                        # === Calibration ===
                         lms = res.multi_face_landmarks[0].landmark
-                        raw_occ, nose_corr, mouth_corr = \
-                            self.baseline.check_occlusion(frame, lms, w, h)
-                        occluded_by_hist = self.smoother.update(raw_occ)
+                        if calib_start is None:
+                            calib_start = now
+                            print("✅ Phát hiện mặt! Đang calibrate baseline...")
+                        calib_remaining = max(0, CALIBRATION_SEC - (now - calib_start))
+                        self.detector.add_calibration_sample(frame, lms, w, h)
+                        if now - calib_start >= CALIBRATION_SEC:
+                            ok, msg = self.detector.finalize_calibration()
+                            if ok:
+                                calib_done = True
+                                print(f"✅ Calibration xong! {msg}\n")
+                                if self.detector.calibration_quality < MIN_QUALITY_WARN:
+                                    print(f"⚠️  Quality={self.detector.calibration_quality:.2f} "
+                                          f"hơi thấp. Cân nhắc recalibrate (nhấn R).")
+                            else:
+                                # Critical fail → reset, thử lại
+                                print(f"❌ Calibration fail: {msg}")
+                                print("   Sẽ thử lại sau 2 giây...")
+                                self.detector.reset()
+                                calib_start = None
+                                time.sleep(2.0)
+                        state = STATE_CALIBRATING
+
+                    elif not face_present and not calib_done:
+                        calib_start = None
+                        state = STATE_NO_FACE
+
                     else:
-                        # Không thấy mặt → smoother không có input mới, reset cho sạch
-                        self.smoother.reset()
+                        # === Monitoring ===
+                        occluded_by_detector = False
+                        if face_present:
+                            lms = res.multi_face_landmarks[0].landmark
+                            check_result = self.detector.check(
+                                frame, lms, w, h,
+                                prev_in_alert=self._prev_in_alert,
+                            )
+                            if check_result is not None:
+                                occluded_by_detector = self.smoother.update(
+                                    check_result.occluded
+                                )
+                        else:
+                            self.smoother.reset()
 
-                    result = self.fsm.step(
-                        now=now,
-                        face_present=face_present,
-                        occluded_by_histogram=occluded_by_hist,
-                        person_in_frame=person_seen,
-                    )
-                    state   = result.state
-                    elapsed = result.elapsed
-                    trigger = result.trigger
+                        result_fsm = self.fsm.step(
+                            now=now,
+                            face_present=face_present,
+                            occluded_by_histogram=occluded_by_detector,
+                            person_in_frame=person_seen,
+                        )
+                        state   = result_fsm.state
+                        elapsed = result_fsm.elapsed
+                        trigger = result_fsm.trigger
 
-                    # In log khi chuyển trạng thái nguy hiểm
-                    if result.should_alert:
-                        print(f"🚨 Đủ ngưỡng {OCCLUSION_THRESHOLD_SEC}s — "
-                              f"trigger={trigger} elapsed={elapsed:.1f}s")
-                        self._dispatch_alert(frame, elapsed,
-                                             nose_corr, mouth_corr, trigger)
+                        if result_fsm.should_alert:
+                            print(f"🚨 Đủ ngưỡng {OCCLUSION_THRESHOLD_SEC}s — "
+                                  f"trigger={trigger} elapsed={elapsed:.1f}s")
+                            self._dispatch_alert(frame, elapsed,
+                                                 check_result, trigger)
 
-                    # Cập nhật baseline khi an toàn (chỉ khi có mặt)
-                    if state == STATE_SAFE and face_present:
-                        lms = res.multi_face_landmarks[0].landmark
-                        self.baseline.update(frame, lms, w, h)
+                        # === Auto-recalibrate sau N giây safe liên tục ===
+                        if AUTO_RECAL_AFTER_SEC > 0 and state == STATE_SAFE:
+                            if self._safe_streak_start is None:
+                                self._safe_streak_start = now
+                            elif now - self._safe_streak_start > AUTO_RECAL_AFTER_SEC:
+                                self._request_recalibrate(
+                                    f"safe liên tục {AUTO_RECAL_AFTER_SEC}s — refresh baseline"
+                                )
+                        else:
+                            self._safe_streak_start = None
 
-                lms_draw = (res.multi_face_landmarks[0].landmark
-                            if face_present else None)
-                frame = self.draw_ui(
-                    frame, lms_draw, state, elapsed,
-                    face_present, nose_corr, mouth_corr,
-                    calib_remaining, w, h,
-                    trigger=trigger, person_seen=person_seen,
-                )
+                    # Cập nhật prev alert cho frame sau
+                    self._prev_in_alert = (state == STATE_ALERT)
 
-                cv2.imshow('Baby Monitor V5 | Q = thoat', frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-
-        cap.release()
-        cv2.destroyAllWindows()
-        print("🔴 Đã dừng")
+                    # === UI + hotkey 'R' ===
+                    if not HEADLESS:
+                        lms_draw = (res.multi_face_landmarks[0].landmark
+                                    if face_present else None)
+                        frame = self.draw_ui(
+                            frame, lms_draw, state, elapsed, face_present,
+                            check_result, calib_remaining, w, h,
+                            trigger=trigger, person_seen=person_seen,
+                        )
+                        cv2.imshow('Baby Monitor V5 | Q=thoat R=recal', frame)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
+                            break
+                        elif key == ord('r'):
+                            self._request_recalibrate("user nhấn R")
+        except KeyboardInterrupt:
+            print("\n⏹  Nhận Ctrl+C, dừng...")
+        except Exception as e:
+            print(f"💥 Lỗi không xử lý được: {type(e).__name__}: {e}")
+            raise
+        finally:
+            cap.release()
+            if not HEADLESS:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+            print("🔴 Đã dừng")
 
 
 if __name__ == "__main__":

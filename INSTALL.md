@@ -1,301 +1,402 @@
-# Hướng dẫn cài đặt Baby AI Alert
+# Hướng dẫn cài đặt Baby AI Alert trên Orange Pi 5
 
-Hệ thống phát hiện nguy cơ ngạt thở ở trẻ qua camera, gửi cảnh báo Telegram.
+Phiên bản cài đặt cho board nhúng **Orange Pi 5 / 5B / 5 Plus** (RK3588 SoC, Linux ARM64).
 
 ## Mục lục
 
-1. [Yêu cầu phần cứng](#1-yêu-cầu-phần-cứng)
-2. [Cài driver NVIDIA + CUDA](#2-cài-driver-nvidia--cuda) (chỉ khi có GPU)
-3. [Cài Python + dependencies](#3-cài-python--dependencies)
-4. [Tạo Telegram bot + lấy token](#4-tạo-telegram-bot--lấy-token)
-5. [Cấu hình bằng biến môi trường](#5-cấu-hình-bằng-biến-môi-trường)
-6. [Verify cài đặt](#6-verify-cài-đặt)
-7. [Chạy chương trình](#7-chạy-chương-trình)
-8. [Đóng gói production (autostart)](#8-đóng-gói-production-autostart)
-9. [Troubleshooting](#9-troubleshooting)
+1. [Phần cứng đang dùng](#1-phần-cứng-đang-dùng)
+2. [Cài hệ điều hành](#2-cài-hệ-điều-hành)
+3. [Setup ban đầu](#3-setup-ban-đầu-ssh--update--swap)
+4. [Cài system dependencies](#4-cài-system-dependencies)
+5. [Cài Python + project dependencies](#5-cài-python--project-dependencies)
+6. [Tạo Telegram bot + lấy token](#6-tạo-telegram-bot--lấy-token)
+7. [Cấu hình bằng `.env`](#7-cấu-hình-bằng-env)
+8. [Verify cài đặt](#8-verify-cài-đặt)
+9. [Chạy chương trình](#9-chạy-chương-trình)
+10. [Autostart bằng systemd](#10-autostart-bằng-systemd)
+11. [(Optional) Tăng tốc bằng NPU RK3588](#11-optional-tăng-tốc-bằng-npu-rk3588)
+12. [(Optional) Kích relay khi có cảnh báo](#12-optional-kích-relay-khi-có-cảnh-báo)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
-## 1. Yêu cầu phần cứng
+## 1. Phần cứng đang dùng
 
-| Thành phần | Tối thiểu | Khuyến nghị |
-|---|---|---|
-| **CPU** | x86 4 core 2.0GHz | x86 8 core 3.0GHz+ |
-| **RAM** | 4 GB | 8 GB+ |
-| **GPU** | Không bắt buộc | NVIDIA Quadro/GTX/RTX, ≥2GB VRAM |
-| **Camera** | USB webcam 720p | Logitech C270/C920 / IP camera RTSP có IR night-vision |
-| **OS** | Windows 10/11, Ubuntu 20.04+ | Windows 11 |
-| **Python** | 3.10 | 3.10 - 3.12 (3.14 chưa được mediapipe support đầy đủ) |
-| **Mạng** | Ổn định để gửi Telegram | |
+| Thành phần | Specs |
+|---|---|
+| **Board** | Orange Pi 5 / 5B / 5 Plus (RK3588, 8 core ARM Cortex-A76+A55, NPU 6 TOPS) |
+| **RAM** | 4 GB / 8 GB / 16 GB |
+| **Storage** | microSD ≥32GB (Class 10) hoặc eMMC ≥32GB hoặc NVMe SSD |
+| **Camera** | Logitech USB webcam (C270/C310/...) |
+| **Mạng** | Ethernet hoặc WiFi |
+| **Tản nhiệt** | RK3588 nóng — **bắt buộc** có heatsink + quạt, không có sẽ thermal throttle |
+| **Nguồn** | USB-C 5V/4A (≥20W) — dùng adapter chuẩn, đừng cắm cable điện thoại 5V/2A |
 
-> **Lưu ý quan trọng về Python**: MediaPipe hiện tại chỉ có wheel sẵn cho **Python 3.10 - 3.12**. Nếu máy bạn đang dùng Python 3.13+ → cài thêm bản 3.12 song song.
+### Cách verify model chính xác (sau khi cài OS):
+```bash
+cat /proc/device-tree/model
+# Output ví dụ: "Xunlong Orange Pi 5"
+```
 
 ---
 
-## 2. Cài driver NVIDIA + CUDA
+## 2. Cài hệ điều hành
 
-> Bỏ qua mục này nếu chỉ chạy CPU. Pipeline vẫn hoạt động không có GPU, chỉ chậm hơn.
+Khuyến nghị **Ubuntu 22.04 ARM64** (chính thức từ Orange Pi) hoặc **Armbian**.
 
-### 2.1 Cài driver
+### 2.1 Tải image
+- Ubuntu chính thức: http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-Pi-5.html
+- Armbian: https://www.armbian.com/orange-pi-5/
 
-1. Vào https://www.nvidia.com/Download/index.aspx
-2. Chọn đúng dòng card (vd: **Quadro P400 / P620 / T400**)
-3. Tải Studio Driver hoặc Game Ready Driver, cài → **reboot**
-4. Verify:
-   ```powershell
-   nvidia-smi
+Chọn **Ubuntu 22.04 Server** (không cần desktop nếu chạy headless — đỡ tốn RAM).
+
+### 2.2 Flash vào SD card
+
+Dùng **Balena Etcher** (Windows/Mac) hoặc `dd` (Linux):
+```bash
+# Linux
+sudo dd if=Orangepi5_x.x.x_ubuntu_jammy_server_linux.img of=/dev/sdX bs=4M status=progress
+sync
+```
+
+### 2.3 Boot lần đầu
+
+1. Cắm SD card, cắm HDMI + bàn phím + nguồn USB-C
+2. Đợi 1-2 phút boot xong
+3. Login mặc định: `root` / `orangepi` (đổi password ngay sau khi login)
+4. Tạo user thường, KHÔNG chạy app dưới root:
+   ```bash
+   adduser pi
+   usermod -aG sudo,video pi
+   su - pi
    ```
-   Phải thấy: tên card, CUDA version (góc phải trên), driver version.
 
-### 2.2 Không cần cài CUDA Toolkit riêng
+### 2.4 Boot từ eMMC / NVMe (khuyến nghị production)
 
-PyTorch wheel đã đóng gói sẵn CUDA runtime. Chỉ cần driver.
+SD card hay hỏng sau vài tháng vận hành 24/7. Nếu board có eMMC hoặc gắn được NVMe → flash OS vào đó:
+
+```bash
+sudo orangepi-config   # menu: System → Install to eMMC/NVMe
+```
 
 ---
 
-## 3. Cài Python + dependencies
+## 3. Setup ban đầu (SSH + update + swap)
 
-### 3.1 Cài Python 3.12 (khuyến nghị)
+### 3.1 Mạng + SSH
 
-Tải https://www.python.org/downloads/release/python-3128/ → chọn **"Add to PATH"** lúc cài.
+```bash
+# Kiểm tra IP
+ip a
 
-Verify:
-```powershell
-py -3.12 --version
+# Bật SSH (thường đã bật sẵn)
+sudo systemctl enable --now ssh
 ```
 
-### 3.2 Tạo virtual environment
-
-```powershell
-cd d:\AI-AGENT\baby-ai-alert
-py -3.12 -m venv venv
-venv\Scripts\activate
-python -m pip install --upgrade pip
+Từ máy tính khác:
+```bash
+ssh pi@<orange-pi-ip>
 ```
 
-Sau khi `activate`, prompt sẽ có `(venv)` ở đầu.
+### 3.2 Update hệ thống
 
-### 3.3 Cài deps cơ bản
-
-```powershell
-pip install -r requirements.txt
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo reboot
 ```
 
-File này cài: `opencv-python`, `mediapipe`, `numpy`, `python-telegram-bot`, `ultralytics`.
+### 3.3 Đồng bộ giờ NTP
 
-### 3.4 Cài PyTorch CUDA (nếu có GPU)
-
-`ultralytics` mặc định kéo PyTorch CPU. Để dùng GPU cần thay bằng bản CUDA:
-
-```powershell
-pip uninstall -y torch torchvision
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+Timestamp trong alert Telegram phải đúng:
+```bash
+sudo timedatectl set-timezone Asia/Ho_Chi_Minh
+sudo timedatectl set-ntp true
+timedatectl status   # verify
 ```
 
-Verify CUDA hoạt động:
-```powershell
-python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
+### 3.4 Tạo swap (board RAM nhỏ)
+
+Nếu RAM ≤ 4GB → tạo swap 2GB để `pip install mediapipe` không bị OOM lúc build:
+
+```bash
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+free -h   # verify
 ```
-
-Phải in `CUDA available: True` và tên card.
-
-### 3.5 Set encoding UTF-8 cho terminal
-
-Windows console mặc định không hiển thị emoji → log của chương trình sẽ crash. Set 1 lần cho mỗi session:
-
-```powershell
-$env:PYTHONIOENCODING = "utf-8"
-```
-
-Hoặc set vĩnh viễn trong PowerShell profile (`$PROFILE`).
 
 ---
 
-## 4. Tạo Telegram bot + lấy token
+## 4. Cài system dependencies
 
-### 4.1 Tạo bot
+### 4.1 Build tools + libraries (cho việc compile pip wheels nếu cần)
 
+```bash
+sudo apt install -y \
+    python3 python3-pip python3-venv python3-dev \
+    build-essential cmake pkg-config git \
+    libopencv-dev \
+    libjpeg-dev libpng-dev libtiff-dev \
+    libv4l-dev v4l-utils \
+    libatlas-base-dev gfortran \
+    libffi-dev libssl-dev
+```
+
+### 4.2 Quyền truy cập camera
+
+User chạy app phải thuộc group `video`:
+```bash
+sudo usermod -aG video $USER
+# Logout/login lại để áp dụng
+```
+
+### 4.3 Kiểm tra webcam được nhận
+
+Cắm Logitech webcam vào cổng USB **3.0** (cổng xanh), không cắm USB 2.0 (sẽ giới hạn FPS):
+
+```bash
+v4l2-ctl --list-devices
+# Phải thấy: HD Webcam C270 hoặc tương tự
+# /dev/video0, /dev/video1...
+
+v4l2-ctl -d /dev/video0 --list-formats-ext
+# Liệt kê resolution + FPS hỗ trợ
+```
+
+---
+
+## 5. Cài Python + project dependencies
+
+### 5.1 Clone source code
+
+```bash
+cd /opt
+sudo git clone <your-repo-url> baby-monitor
+sudo chown -R $USER:$USER baby-monitor
+cd baby-monitor
+```
+
+(Hoặc copy thư mục `baby-ai-alert/` từ máy dev qua bằng `scp`/`rsync`.)
+
+### 5.2 Tạo virtualenv
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip wheel setuptools
+```
+
+### 5.3 Cài MediaPipe ARM64 — phần khó nhất
+
+MediaPipe có wheel cho `aarch64` từ phiên bản 0.10.x trở đi nhưng chỉ hỗ trợ Python **3.9 - 3.11**. Kiểm tra Python version:
+
+```bash
+python --version
+```
+
+- Nếu là 3.10 hoặc 3.11 → cài bình thường:
+  ```bash
+  pip install mediapipe
+  ```
+- Nếu Python 3.12+ → cài Python 3.11 song song:
+  ```bash
+  sudo apt install -y python3.11 python3.11-venv python3.11-dev
+  python3.11 -m venv venv
+  source venv/bin/activate
+  pip install --upgrade pip
+  pip install mediapipe
+  ```
+
+### 5.4 Cài các deps còn lại
+
+```bash
+pip install opencv-python numpy python-telegram-bot ultralytics
+```
+
+> **Lưu ý**: `ultralytics` kéo theo PyTorch. Trên ARM64, pip sẽ cài bản **CPU-only** (~200MB) — đúng rồi, vì RK3588 không có CUDA. Tăng tốc qua NPU sẽ làm ở mục 11.
+
+### 5.5 Verify import
+
+```bash
+python -c "import cv2, mediapipe, numpy, telegram, ultralytics; print('All imports OK')"
+```
+
+Phải in `All imports OK`. Nếu lỗi → xem mục 13 (Troubleshooting).
+
+---
+
+## 6. Tạo Telegram bot + lấy token
+
+### 6.1 Tạo bot
 1. Mở Telegram, tìm `@BotFather`
-2. Gõ `/newbot`, đặt tên, đặt username (kết thúc bằng `bot`)
-3. BotFather trả về **token** dạng `1234567890:ABC...` → copy lại
+2. Gõ `/newbot`, đặt tên + username (kết thúc bằng `bot`)
+3. Copy **token** dạng `1234567890:ABC...`
 
-### 4.2 Lấy chat ID
-
+### 6.2 Lấy chat ID
 1. Gõ vài tin nhắn cho bot vừa tạo
-2. Truy cập (thay TOKEN):
+2. Truy cập:
    ```
    https://api.telegram.org/bot<TOKEN>/getUpdates
    ```
-3. Trong JSON trả về tìm `"chat":{"id":7316578932,...}` → đó là **chat ID**
+3. Tìm `"chat":{"id":7316578932,...}` → đó là **chat ID**
 
-### 4.3 Test gửi tin
+### 6.3 Test gửi tin từ Orange Pi
 
-```powershell
-$token = "TOKEN_CỦA_BẠN"
-$chat  = "CHAT_ID"
-curl "https://api.telegram.org/bot$token/sendMessage?chat_id=$chat&text=test"
+```bash
+TOKEN="..."
+CHAT="..."
+curl -s "https://api.telegram.org/bot$TOKEN/sendMessage?chat_id=$CHAT&text=test+from+opi"
 ```
 
-Bot phải gửi "test" về Telegram của bạn.
+Phải nhận tin "test from opi" trong Telegram.
 
 ---
 
-## 5. Cấu hình bằng biến môi trường
+## 7. Cấu hình bằng `.env`
 
-Tất cả config đều có default — chỉ override khi cần.
-
-| Biến | Default | Mô tả |
-|---|---|---|
-| `TELEGRAM_TOKEN` | hardcode trong code | Token bot Telegram |
-| `TELEGRAM_CHAT_ID` | hardcode | Chat ID nhận cảnh báo |
-| `CAMERA_SOURCE` | `0` | USB index (`0`, `1`...) hoặc `rtsp://user:pass@ip:554/stream` |
-| `CAMERA_WIDTH` | `1280` | Resolution rộng |
-| `CAMERA_HEIGHT` | `720` | Resolution cao |
-| `CAMERA_FPS` | `30` | Target FPS |
-| `YOLO_DEVICE` | `auto` | `auto` / `cuda` / `cpu` |
-| `YOLO_EVERY` | `0` (auto) | Chạy YOLO mỗi N frame; `0` = auto (2 nếu CUDA, 5 nếu CPU) |
-
-### Set tạm thời (cho session hiện tại)
-
-```powershell
-$env:TELEGRAM_TOKEN = "1234567890:ABC..."
-$env:TELEGRAM_CHAT_ID = "7316578932"
-$env:CAMERA_SOURCE = "0"
-$env:YOLO_DEVICE = "auto"
-$env:PYTHONIOENCODING = "utf-8"
-```
-
-### Set vĩnh viễn — dùng file `.env`
-
-Tạo `D:\AI-AGENT\baby-ai-alert\.env`:
-```
+```bash
+cat > /opt/baby-monitor/.env << 'EOF'
 TELEGRAM_TOKEN=1234567890:ABC...
 TELEGRAM_CHAT_ID=7316578932
 CAMERA_SOURCE=0
-YOLO_DEVICE=auto
+CAMERA_WIDTH=1280
+CAMERA_HEIGHT=720
+CAMERA_FPS=30
+YOLO_DEVICE=cpu
+YOLO_EVERY=5
 PYTHONIOENCODING=utf-8
+EOF
+
+chmod 600 /opt/baby-monitor/.env   # chỉ owner đọc được — bảo vệ token
 ```
 
-Tạo `run.ps1`:
-```powershell
-Get-Content .env | ForEach-Object {
-    if ($_ -match "^([^=]+)=(.*)$") {
-        Set-Item -Path "env:$($matches[1])" -Value $matches[2]
-    }
-}
-& venv\Scripts\python.exe src\main.py
-```
-
-Sau này chỉ cần `.\run.ps1`.
-
-> ⚠️ **Đừng commit `.env` lên git** — thêm `.env` vào `.gitignore`.
-
----
-
-## 6. Verify cài đặt
-
-Chạy theo thứ tự, mỗi bước phải pass mới qua bước sau.
-
-### 6.1 Test state machine (không cần camera/GPU/network)
-
-```powershell
-python tests\test_state_machine.py
-```
-
-Kỳ vọng: `🎉 11/11 test PASS`. Nếu fail → báo cho dev (state machine logic sai).
-
-### 6.2 Scan camera
-
-```powershell
-python scripts\test_webcam.py --scan
-```
-
-Liệt kê index camera khả dụng. Webcam Logitech thường ở index 0 (hoặc 1 nếu có camera laptop).
-
-### 6.3 Verify webcam chạy đúng resolution + FPS
-
-```powershell
-python scripts\test_webcam.py --source 0
-```
-
-Mở cửa sổ live 8s, đo FPS thực. Kỳ vọng FPS thực ≥ 21fps (70% của 30).
-
-Nếu headless server (không màn hình):
-```powershell
-python scripts\test_webcam.py --source 0 --headless --save-snapshot events\webcam_test.jpg
-```
-
-### 6.4 Benchmark pipeline
-
-```powershell
-# Đo full pipeline
-python scripts\benchmark.py --frames 200
-
-# So sánh CPU vs GPU
-python scripts\benchmark.py --frames 100 --yolo-device cpu
-python scripts\benchmark.py --frames 100 --yolo-device cuda
-```
-
-Kỳ vọng (Quadro P400 + Logitech C270):
-| Stage | CPU | CUDA |
+| Biến | Giá trị Orange Pi | Ghi chú |
 |---|---|---|
-| MediaPipe | 8-15ms | (CPU only) |
-| Histogram | 1-3ms | - |
-| YOLO | 80-120ms | 8-15ms |
-| **End-to-end** | ~110ms (~9 FPS) | ~30ms (~30 FPS) |
+| `CAMERA_SOURCE` | `0` | Hoặc `/dev/video0`, hoặc `rtsp://...` |
+| `CAMERA_WIDTH/HEIGHT` | `1280` / `720` | Nếu FPS thấp → giảm xuống `640`/`480` |
+| `CAMERA_FPS` | `30` | Mục tiêu; thực tế phụ thuộc USB + pipeline |
+| `YOLO_DEVICE` | `cpu` | Hoặc `cuda` sau khi setup RKNN (mục 11) |
+| `YOLO_EVERY` | `5` | Chạy YOLO mỗi 5 frame để đỡ tải CPU |
 
-Nếu end-to-end > 33ms → script tự suggest fix (giảm res, throttle YOLO, dùng TensorRT...).
+> ⚠️ Đừng commit `.env` lên git. Thêm `.env` vào `.gitignore`.
 
 ---
 
-## 7. Chạy chương trình
+## 8. Verify cài đặt
 
-```powershell
-venv\Scripts\activate
-python src\main.py
+Chạy theo thứ tự, mỗi bước phải pass.
+
+### 8.1 Test state machine (không cần camera)
+```bash
+cd /opt/baby-monitor
+source venv/bin/activate
+python tests/test_state_machine.py
+```
+Kỳ vọng: `🎉 11/11 test PASS`.
+
+### 8.2 Scan camera
+```bash
+python scripts/test_webcam.py --scan
 ```
 
-### Quy trình:
-1. Chương trình mở camera, log resolution + FPS thực tế
-2. Chờ phát hiện mặt → in `✅ Phát hiện mặt!`
-3. Calibrate 5s — **giữ nguyên mặt trẻ**, không di chuyển
-4. In `✅ Calibration xong! Bắt đầu giám sát.`
-5. Live: hiển thị landmarks mũi/miệng + correlation
-6. Khi che mũi/miệng → countdown 15s → gửi Telegram + lưu vào `events/`
+### 8.3 Verify webcam FPS thực tế
 
-### Test cảnh báo:
-1. Lấy khăn/tay che mũi-miệng (vẫn để mặt trong khung) → đợi 15s → phải nhận tin Telegram (`MUI/MIENG BI CHE`)
-2. Lấy chăn phủ kín cả mặt → đợi 15s → tin Telegram (`Mất hoàn toàn khuôn mặt`)
-3. Bước hẳn ra ngoài camera → state về `NO_FACE`, **không** gửi tin
+Headless (không HDMI):
+```bash
+python scripts/test_webcam.py --source 0 --headless --save-snapshot events/webcam_test.jpg
+```
 
-Mỗi lần alert lưu 1 file `events/possible_suffocation_risk_<timestamp>.jpg` + `.json`.
+Có HDMI/màn hình:
+```bash
+python scripts/test_webcam.py --source 0
+```
 
-### Thoát: nhấn `Q` trong cửa sổ camera.
+Kỳ vọng FPS thực ≥ 21fps. Nếu thấp hơn:
+- Cắm cổng USB 3.0 (cổng xanh, không phải đen)
+- Cáp USB ngắn, chất lượng tốt
+- Giảm resolution xuống 640x480
+
+### 8.4 Benchmark pipeline
+
+```bash
+python scripts/benchmark.py --frames 100
+```
+
+Kỳ vọng trên RK3588 (CPU only, không NPU):
+| Stage | Thời gian |
+|---|---|
+| MediaPipe (1280x720) | 25-40ms |
+| Histogram | 1-2ms |
+| YOLO CPU (chạy mỗi 5 frame, amortized) | 15-30ms |
+| **End-to-end** | ~70-90ms (~12-14 FPS) |
+
+Nếu chậm hơn:
+- Giảm `CAMERA_WIDTH/HEIGHT` xuống `640`/`480`
+- Tăng `YOLO_EVERY` lên `10`
+- Setup NPU (mục 11) — sẽ tăng FPS YOLO lên ~10x
 
 ---
 
-## 8. Đóng gói production (autostart)
+## 9. Chạy chương trình
 
-### Windows — dùng Task Scheduler
+### 9.1 Load `.env` và chạy
 
-1. Tạo file `D:\AI-AGENT\baby-ai-alert\start.bat`:
-   ```bat
-   @echo off
-   cd /d D:\AI-AGENT\baby-ai-alert
-   call venv\Scripts\activate
-   set PYTHONIOENCODING=utf-8
-   python src\main.py >> logs\out.log 2>&1
-   ```
-2. Tạo folder `logs\`
-3. Mở **Task Scheduler** → **Create Basic Task**:
-   - Trigger: **At log on** (hoặc **At startup**)
-   - Action: Start a program → `D:\AI-AGENT\baby-ai-alert\start.bat`
-   - Settings: ✅ "Restart task if fails" (sau 1 phút, 3 lần)
+Tạo `/opt/baby-monitor/run.sh`:
+```bash
+#!/bin/bash
+set -e
+cd /opt/baby-monitor
+set -a
+source .env
+set +a
+source venv/bin/activate
+exec python src/main.py
+```
 
-### Linux — systemd service
+```bash
+chmod +x /opt/baby-monitor/run.sh
+./run.sh
+```
 
-```ini
-# /etc/systemd/system/baby-monitor.service
+### 9.2 Test 3 kịch bản cảnh báo
+
+1. **Histogram alert**: che mũi-miệng bằng tay/khăn (vẫn để mặt trong khung) → 15s → Telegram báo `MUI/MIENG BI CHE`
+2. **Face lost alert**: phủ chăn kín mặt → 15s → Telegram báo `Mất hoàn toàn khuôn mặt`
+3. **Rời khung (không alert)**: bước hẳn ra ngoài camera → state về `NO_FACE`, **không** gửi tin
+
+Mỗi alert lưu `events/possible_suffocation_risk_<timestamp>.jpg` + `.json`.
+
+### 9.3 Headless (không màn hình)
+
+App mặc định gọi `cv2.imshow()` để hiển thị live view. Trên server headless việc này sẽ lỗi `cannot connect to X server`. Có 2 cách xử lý:
+
+**A. Forward X qua SSH** (tạm thời, để test):
+```bash
+ssh -X pi@<opi-ip>
+./run.sh
+```
+
+**B. Disable imshow** (production): edit [src/main.py](src/main.py), bao quanh `cv2.imshow()` và `cv2.waitKey()` bằng:
+```python
+HEADLESS = os.environ.get("HEADLESS", "0") == "1"
+# ...
+if not HEADLESS:
+    cv2.imshow(...)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+```
+Rồi set `HEADLESS=1` trong `.env`.
+
+---
+
+## 10. Autostart bằng systemd
+
+### 10.1 Tạo service file
+
+```bash
+sudo tee /etc/systemd/system/baby-monitor.service > /dev/null << 'EOF'
 [Unit]
 Description=Baby AI Alert Monitor
 After=network.target
@@ -303,112 +404,246 @@ After=network.target
 [Service]
 Type=simple
 User=pi
+Group=video
 WorkingDirectory=/opt/baby-monitor
 EnvironmentFile=/opt/baby-monitor/.env
 ExecStart=/opt/baby-monitor/venv/bin/python /opt/baby-monitor/src/main.py
 Restart=always
-RestartSec=5
+RestartSec=10
+StandardOutput=append:/var/log/baby-monitor.log
+StandardError=append:/var/log/baby-monitor.log
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
+### 10.2 Tạo file log + enable
+
 ```bash
+sudo touch /var/log/baby-monitor.log
+sudo chown pi:pi /var/log/baby-monitor.log
+
 sudo systemctl daemon-reload
 sudo systemctl enable baby-monitor
 sudo systemctl start baby-monitor
 sudo systemctl status baby-monitor
-journalctl -u baby-monitor -f   # xem log live
 ```
 
-### Lưu ý production:
-- **Log rotation**: file log dài hạn sẽ đầy disk → setup `logrotate` (Linux) hoặc xóa thủ công (Windows)
-- **Cleanup events/**: tạo script cron xóa file > 30 ngày
-- **NTP**: đồng bộ thời gian (`w32tm` Windows / `chronyd` Linux) để timestamp chính xác
+### 10.3 Theo dõi log live
+
+```bash
+journalctl -u baby-monitor -f
+# hoặc
+tail -f /var/log/baby-monitor.log
+```
+
+### 10.4 Log rotation (tránh đầy đĩa)
+
+```bash
+sudo tee /etc/logrotate.d/baby-monitor > /dev/null << 'EOF'
+/var/log/baby-monitor.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    create 0644 pi pi
+    postrotate
+        systemctl restart baby-monitor > /dev/null 2>&1 || true
+    endscript
+}
+EOF
+```
+
+### 10.5 Dọn `events/` định kỳ
+
+Cron job xóa snapshot cũ:
+```bash
+crontab -e
+# Thêm dòng:
+0 2 * * * find /opt/baby-monitor/events -mtime +30 -delete
+```
 
 ---
 
-## 9. Troubleshooting
+## 11. (Optional) Tăng tốc bằng NPU RK3588
 
-### Lỗi: `ModuleNotFoundError: No module named 'mediapipe'`
-- Chưa activate venv → chạy `venv\Scripts\activate`
-- Hoặc Python version > 3.12 → cài lại với 3.12
+**Khi nào nên làm**: chỉ khi mục 8.4 benchmark cho end-to-end > 33ms (FPS < 30) và bạn cần real-time hơn.
 
-### Lỗi: `ImportError: DLL load failed` khi import cv2 (Windows)
-- Cài Microsoft Visual C++ Redistributable: https://aka.ms/vs/17/release/vc_redist.x64.exe
+RK3588 có **NPU 6 TOPS** dùng được cho YOLO inference, giảm thời gian từ ~80ms (CPU) xuống ~10ms (NPU).
 
-### `nvidia-smi` không tìm thấy
-- Driver chưa cài hoặc cài lỗi → cài lại + reboot
-- Verify card được nhận: Device Manager → Display adapters
+### 11.1 Cài rknn-toolkit2 trên máy DEV (không phải OPi)
 
-### `torch.cuda.is_available()` trả về `False`
-- Kiểm tra `nvidia-smi` chạy được — nếu không thì lỗi driver
-- Đang cài bản torch CPU → cài lại với `--index-url https://download.pytorch.org/whl/cu121`
-- Card quá cũ (Compute Capability < 5.0) → cần torch+cu118 thay vì cu121
+Convert YOLOv8n → RKNN format cần làm trên máy x86 Linux:
+```bash
+# Trên máy dev (Ubuntu x86_64)
+pip install rknn-toolkit2 onnx
+yolo export model=yolov8n.pt format=onnx
+# Sau đó dùng rknn-toolkit2 convert .onnx → .rknn
+# Theo doc: https://github.com/rockchip-linux/rknn-toolkit2
+```
 
-### Camera không mở được — `❌ Không mở được camera: 0`
-- Camera đang bị app khác giữ (Skype, Zoom, Teams...) → tắt
-- Sai index → `python scripts\test_webcam.py --scan`
-- Trên Linux: thiếu quyền → `sudo usermod -a -G video $USER` và logout/login
+Output: `yolov8n.rknn` (~6MB).
 
-### FPS thực tế thấp hơn target nhiều
-- USB 2.0 không đủ băng thông cho 720p MJPG → cắm cổng USB 3.0 (cổng xanh)
-- Cáp USB dài/kém → đổi cáp ngắn hơn
-- Camera không hỗ trợ resolution → giảm:
-  ```powershell
-  $env:CAMERA_WIDTH  = "640"
-  $env:CAMERA_HEIGHT = "480"
+### 11.2 Trên Orange Pi: cài rknn-lite runtime
+
+```bash
+pip install rknn-toolkit-lite2
+```
+
+### 11.3 Sửa code để dùng RKNN thay PyTorch
+
+Cần viết wrapper `RKNNPersonDetector` trong [src/main.py](src/main.py) thay cho `PersonDetector` hiện tại. Logic giống nhau (`has_person()`), chỉ thay inference engine. Ping mình khi cần làm bước này.
+
+---
+
+## 12. (Optional) Kích relay khi có cảnh báo
+
+Module relay 4 kênh bạn đang có (LED xanh) có thể đấu vào GPIO của OPi để:
+- **Kênh 1**: bật còi báo động khi alert
+- **Kênh 2**: bật đèn cảnh báo
+- **Kênh 3**: kích thiết bị khác (quạt, monitor phụ huynh...)
+- **Kênh 4**: dự phòng
+
+### 12.1 Đấu dây
+
+| Relay pin | OPi GPIO (BCM) | OPi physical pin |
+|---|---|---|
+| VCC | 5V | Pin 2 |
+| GND | GND | Pin 6 |
+| IN1 | GPIO 17 | Pin 11 |
+| IN2 | GPIO 27 | Pin 13 |
+| IN3 | GPIO 22 | Pin 15 |
+| IN4 | GPIO 23 | Pin 16 |
+
+> ⚠️ Relay 5V — OPi GPIO output 3.3V có thể không trigger được trên một số relay module. Nếu vậy → dùng relay 3.3V hoặc thêm transistor BJT/MOSFET đệm.
+
+### 12.2 Cài thư viện GPIO
+
+```bash
+pip install OPi.GPIO
+# Hoặc dùng gpiod (chuẩn kernel mới)
+sudo apt install python3-libgpiod
+```
+
+### 12.3 Wire vào code
+
+Trong `_dispatch_alert()` của [src/main.py](src/main.py), thêm trigger relay khi `should_alert`:
+
+```python
+import OPi.GPIO as GPIO   # hoặc gpiod
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(17, GPIO.OUT)
+
+def _trigger_relay(channel=17, duration_sec=5):
+    GPIO.output(channel, GPIO.HIGH)
+    threading.Timer(duration_sec, lambda: GPIO.output(channel, GPIO.LOW)).start()
+```
+
+Gọi `_trigger_relay()` trong nhánh `if result.should_alert` của `run()`. Ping mình nếu cần làm hoàn chỉnh.
+
+---
+
+## 13. Troubleshooting
+
+### `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`
+- MediaPipe 0.10.x compile chống NumPy 1.x, nhưng pip lại cài NumPy 2.x → warning + có thể crash hoặc trả landmark sai
+- Fix: pin lại bản 1.x
+  ```bash
+  pip install "numpy<2" --force-reinstall
+  ```
+- `requirements.txt` đã pin `numpy<2` — nếu vẫn lỗi do cài trước đó: `pip install -r requirements.txt --force-reinstall`
+
+### `Could not find a version that satisfies the requirement mediapipe`
+- Python version sai (3.12+ chưa có wheel ARM64 cho mediapipe) → cài Python 3.11
+- Pip outdated → `pip install --upgrade pip`
+
+### `Killed` khi pip install (process bị OOM)
+- Hết RAM → tạo swap (mục 3.4)
+- Cài từng package một thay vì một lệnh dài
+
+### `[ WARN:0 ] global cap_v4l.cpp ... can't open camera by index`
+- User không thuộc group `video` → `sudo usermod -aG video $USER` + logout/login
+- Camera bị app khác giữ → `sudo fuser -k /dev/video0`
+- Sai index → `v4l2-ctl --list-devices`
+
+### FPS thực < 15
+- USB 2.0 thay vì 3.0 → đổi cổng (cổng xanh)
+- Resolution quá cao → giảm xuống 640x480
+- Thermal throttle (RK3588 nóng) → kiểm tra:
+  ```bash
+  cat /sys/class/thermal/thermal_zone0/temp
+  # Nếu > 85000 (85°C) → cần tản nhiệt tốt hơn
   ```
 
-### Telegram không gửi được — `❌ Lỗi Telegram: ...`
-- Token sai → kiểm tra `getUpdates` URL
-- Chat ID sai → bot phải nhận được ít nhất 1 tin trước khi `getUpdates` có chat
-- Tường lửa chặn — test bằng `curl https://api.telegram.org`
+### `cv2.error: ... cannot connect to X server`
+- Đang chạy headless mà code có `cv2.imshow()` → set `HEADLESS=1` (xem mục 9.3)
 
-### Calibration không kết thúc — kẹt ở `CALIBRATING`
-- Mặt không cố định trong 5s → giữ yên
-- Ánh sáng quá tối → mediapipe không detect được landmark
-- Kiểm tra `min_detection_confidence` trong [src/main.py](src/main.py) → giảm xuống 0.3 nếu cần
+### `Failed to send Telegram message`
+- Mạng OPi không có internet → `ping 8.8.8.8`
+- Token / chat ID sai → test bằng curl (mục 6.3)
+- DNS lỗi → `sudo apt install -y resolvconf`
 
-### Báo nhầm liên tục (false alert) khi trẻ chỉ cử động đầu
-- Threshold quá cao → giảm `HIST_CORR_THRESHOLD` từ 0.65 xuống 0.50 trong [src/main.py](src/main.py)
-- Hoặc tăng `CONFIRM_FRAMES` từ 15 lên 30 (cần lâu hơn để confirm)
+### systemd service không start
+```bash
+sudo systemctl status baby-monitor
+journalctl -u baby-monitor -n 50
+```
+Thường vì:
+- `.env` không đọc được (sai path / permission)
+- venv path sai
+- `User=pi` nhưng owner project khác → `sudo chown -R pi:pi /opt/baby-monitor`
 
-### Bỏ sót khi chăn phủ một phần
-- Đảm bảo dùng OR-logic ở [src/main.py:131-133](src/main.py#L131-L133) (`nose_occ or mouth_occ`)
-- Test bằng `python tests\test_state_machine.py` để verify state machine vẫn đúng
+### Sau vài giờ chạy ổn, đột nhiên crash
+- SD card có bad block → check `dmesg | grep -i error`. Production nên dùng eMMC/NVMe
+- Memory leak — set `MemoryMax=1G` trong systemd service để tự restart khi vượt
+- Nhiệt độ — gắn quạt nếu chưa có
 
-### YOLO báo `RuntimeError: CUDA out of memory`
-- Card 2GB VRAM bị tràn — đổi sang `YOLO_DEVICE=cpu`, hoặc dùng model nhỏ hơn
+### MediaPipe load chậm (10-20s khi khởi động)
+- Bình thường trên ARM lần đầu (download/extract model) → cache vào `~/.mediapipe/`
+- Lần boot tiếp theo sẽ nhanh hơn (~3-5s)
 
 ---
 
-## 10. Cấu trúc project
+## 14. Tổng kết stack
 
 ```
-baby-ai-alert/
-├── INSTALL.md              ← file này
-├── requirements.txt
-├── yolov8n.pt              ← YOLOv8 nano cho person detection
-├── face_mask.pt            ← (chưa dùng, dự phòng)
-├── src/
-│   ├── main.py             ← chương trình chính
-│   └── state_machine.py    ← logic phát hiện ngạt thở (testable)
-├── scripts/
-│   ├── test_webcam.py      ← verify webcam
-│   └── benchmark.py        ← đo FPS pipeline
-├── tests/
-│   └── test_state_machine.py
-├── events/                 ← snapshot + JSON khi có cảnh báo
-└── venv/                   ← Python virtual env (gitignore)
+Orange Pi 5 (RK3588, 8GB RAM)
+├── Ubuntu 22.04 Server ARM64
+├── Logitech USB webcam (USB 3.0)
+├── Module relay 4 kênh → GPIO (output cảnh báo cứng)
+│
+├── /opt/baby-monitor/
+│   ├── venv/                     ← Python 3.11 isolated env
+│   ├── src/main.py               ← entrypoint
+│   ├── src/state_machine.py      ← logic, đã test
+│   ├── .env                      ← config (token, camera, YOLO)
+│   ├── run.sh                    ← manual run
+│   ├── events/                   ← snapshot khi alert (rotate 30 ngày)
+│   ├── yolov8n.pt                ← (hoặc .rknn nếu setup NPU)
+│   └── tests/, scripts/
+│
+└── systemd services:
+    ├── baby-monitor.service      ← autostart + restart on crash
+    ├── /etc/logrotate.d/...      ← rotate log 7 ngày
+    └── cron: dọn events/         ← cleanup 2h sáng mỗi ngày
 ```
 
 ---
 
-## 11. Liên hệ / báo lỗi
+## 15. Báo lỗi
 
-Khi gặp vấn đề chưa có trong troubleshooting:
-1. Chạy `python scripts\benchmark.py --frames 50` và copy output
-2. Chụp ảnh log của `python src\main.py`
-3. `nvidia-smi` (nếu có GPU)
-4. Gửi cho dev cùng mô tả tình huống cụ thể.
+Khi gặp vấn đề:
+```bash
+# Thu thập thông tin
+cat /proc/device-tree/model > diag.txt
+free -h >> diag.txt
+v4l2-ctl --list-devices >> diag.txt
+python --version >> diag.txt
+pip list >> diag.txt
+journalctl -u baby-monitor -n 100 >> diag.txt
+python scripts/benchmark.py --frames 50 >> diag.txt 2>&1
+```
+
+Gửi `diag.txt` + mô tả tình huống.

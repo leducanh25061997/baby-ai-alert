@@ -1,5 +1,7 @@
-opencv-python>=4.8
+opencv-python>=4.8,<4.11
 mediapipe>=0.10
-numpy>=1.24
+# numpy<2 bắt buộc — mediapipe 0.10.x compile chống NumPy 1.x, dùng 2.x sẽ ra
+# warning "cannot be run in NumPy 2.x" và có thể crash/sai landmark.
+numpy>=1.24,<2
 python-telegram-bot>=20
 ultralytics>=8.0
