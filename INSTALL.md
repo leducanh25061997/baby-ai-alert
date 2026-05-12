@@ -209,21 +209,45 @@ python --version
   pip install mediapipe
   ```
 
-### 5.4 Cài các deps còn lại
+### 5.4 Cài deps từ `requirements.txt`
 
 ```bash
-pip install opencv-python numpy python-telegram-bot ultralytics
+pip install -r requirements.txt
 ```
 
-> **Lưu ý**: `ultralytics` kéo theo PyTorch. Trên ARM64, pip sẽ cài bản **CPU-only** (~200MB) — đúng rồi, vì RK3588 không có CUDA. Tăng tốc qua NPU sẽ làm ở mục 11.
+`requirements.txt` đã pin sẵn:
+- `numpy>=1.24,<2`  ← mediapipe 0.10.x compile chống NumPy 1.x
+- `opencv-python>=4.8,<4.11`  ← opencv ≥4.11 compile chống NumPy 2.x
+- `mediapipe>=0.10`, `python-telegram-bot>=20`, `ultralytics>=8.0`
 
-### 5.5 Verify import
+> **Lưu ý**: `ultralytics` kéo PyTorch. Trên ARM64, pip sẽ cài bản **CPU-only** (~200MB) — đúng rồi, RK3588 không có CUDA. Tăng tốc qua NPU làm ở mục 11.
 
+### 5.5 Verify + fix version conflicts
+
+```bash
+bash scripts/fix_env.sh
+```
+
+Script này tự động:
+- Uninstall **tất cả** opencv variant (`opencv-python`, `opencv-contrib-python`, `opencv-python-headless`, `opencv-contrib-python-headless`) để clean slate
+- Cài lại `numpy<2` + `opencv-python<4.11` để đảm bảo binary tương thích
+- In version cuối cùng để verify
+
+Sau đó verify import:
 ```bash
 python -c "import cv2, mediapipe, numpy, telegram, ultralytics; print('All imports OK')"
 ```
 
-Phải in `All imports OK`. Nếu lỗi → xem mục 13 (Troubleshooting).
+Phải in `All imports OK`. Nếu fail → xem mục 13 (Troubleshooting).
+
+### 5.6 (Tự động) App có 3 lớp guard chặn env sai
+
+`src/main.py` tự refuse to start nếu phát hiện:
+1. `numpy >= 2` (mediapipe sẽ crash)
+2. Bất kỳ `opencv-python(-contrib)(-headless) >= 4.11` (mismatch numpy 1.x)
+3. Nhiều opencv variant cài cùng lúc (xung đột cv2 namespace)
+
+Khi guard fire, app in command fix rõ ràng và exit. Không có khả năng silent corruption.
 
 ---
 
@@ -258,27 +282,48 @@ Phải nhận tin "test from opi" trong Telegram.
 
 ```bash
 cat > /opt/baby-monitor/.env << 'EOF'
+# ---- Bắt buộc ----
 TELEGRAM_TOKEN=1234567890:ABC...
 TELEGRAM_CHAT_ID=7316578932
+
+# ---- Camera ----
 CAMERA_SOURCE=0
 CAMERA_WIDTH=1280
 CAMERA_HEIGHT=720
 CAMERA_FPS=30
-YOLO_DEVICE=cpu
-YOLO_EVERY=5
+
+# ---- Headless (bắt buộc cho systemd, không có HDMI) ----
+HEADLESS=1
+
+# ---- Detection logic ----
+OCCLUSION_THRESHOLD_SEC=15   # bao nhiêu giây bị che thì alert
+CALIBRATION_SEC=5            # thời gian calibrate ban đầu
+CONFIRM_FRAMES=10            # frame confirm bị che (tăng = ổn hơn, chậm hơn)
+SMOOTHER_MAX_MISS=3          # cho phép N frame miss trong window confirm
+MIN_QUALITY_WARN=0.5         # quality < này → warn UI gợi ý recalib
+AUTO_RECAL_AFTER_SEC=1800    # auto-recalibrate sau N giây safe liên tục (0=tắt)
+
+# ---- YOLO ----
+YOLO_DEVICE=cpu              # cpu | cuda (chỉ cuda sau khi setup RKNN)
+YOLO_EVERY=5                 # chạy YOLO mỗi N frame để đỡ tải
+
 PYTHONIOENCODING=utf-8
 EOF
 
-chmod 600 /opt/baby-monitor/.env   # chỉ owner đọc được — bảo vệ token
+chmod 600 /opt/baby-monitor/.env   # bảo vệ token
 ```
 
-| Biến | Giá trị Orange Pi | Ghi chú |
+| Biến | Default | Tác dụng |
 |---|---|---|
-| `CAMERA_SOURCE` | `0` | Hoặc `/dev/video0`, hoặc `rtsp://...` |
-| `CAMERA_WIDTH/HEIGHT` | `1280` / `720` | Nếu FPS thấp → giảm xuống `640`/`480` |
-| `CAMERA_FPS` | `30` | Mục tiêu; thực tế phụ thuộc USB + pipeline |
-| `YOLO_DEVICE` | `cpu` | Hoặc `cuda` sau khi setup RKNN (mục 11) |
-| `YOLO_EVERY` | `5` | Chạy YOLO mỗi 5 frame để đỡ tải CPU |
+| `CAMERA_SOURCE` | `0` | `0`/`/dev/video0`/`rtsp://...` |
+| `CAMERA_WIDTH/HEIGHT/FPS` | 1280/720/30 | Giảm xuống 640/480/15 nếu OPi yếu |
+| `HEADLESS` | `0` | **Phải set `1` trên systemd** (không có X server) |
+| `OCCLUSION_THRESHOLD_SEC` | `15` | Ngưỡng giây để alert |
+| `CONFIRM_FRAMES` | `10` | Tăng → ổn định hơn, chậm hơn 0.3s |
+| `SMOOTHER_MAX_MISS` | `3` | Cho phép landmark jumpy 3 frame không reset đếm |
+| `AUTO_RECAL_AFTER_SEC` | `1800` | Auto-recalib sau 30 phút safe liên tục |
+| `YOLO_DEVICE` | `cpu` | `cuda` sau khi setup RKNN |
+| `YOLO_EVERY` | `5` | YOLO chạy mỗi 5 frame |
 
 > ⚠️ Đừng commit `.env` lên git. Thêm `.env` vào `.gitignore`.
 
@@ -288,13 +333,24 @@ chmod 600 /opt/baby-monitor/.env   # chỉ owner đọc được — bảo vệ 
 
 Chạy theo thứ tự, mỗi bước phải pass.
 
-### 8.1 Test state machine (không cần camera)
+### 8.1 Test logic (không cần camera)
 ```bash
 cd /opt/baby-monitor
 source venv/bin/activate
+
+# State machine logic (FSM phát hiện ngạt thở)
 python tests/test_state_machine.py
+# Kỳ vọng: 🎉 11/11 test PASS
+
+# Multi-signal occlusion detector (hist + skin + edge + lap_var)
+python tests/test_occlusion_detector.py
+# Kỳ vọng: 🎉 14/14 test PASS
 ```
-Kỳ vọng: `🎉 11/11 test PASS`.
+
+Trong test_occlusion_detector có các test quan trọng:
+- `test_check_on_hand_alerts` — verify tay che mặt phải alert
+- `test_hand_stability_under_landmark_drift` — verify ổn định khi landmark nhảy
+- `test_check_on_blanket_alerts` — verify chăn phải alert
 
 ### 8.2 Scan camera
 ```bash
@@ -328,14 +384,19 @@ Kỳ vọng trên RK3588 (CPU only, không NPU):
 | Stage | Thời gian |
 |---|---|
 | MediaPipe (1280x720) | 25-40ms |
-| Histogram | 1-2ms |
+| Multi-signal detector (3 landmark mouth × 4 signal + 1 landmark nose × 4) | 6-12ms |
 | YOLO CPU (chạy mỗi 5 frame, amortized) | 15-30ms |
-| **End-to-end** | ~70-90ms (~12-14 FPS) |
+| **End-to-end** | ~80-100ms (~10-12 FPS) |
+
+> Note: pipeline hiện tại nặng hơn bản trước (~1 landmark + 1 signal) ~20ms vì
+> dùng multi-signal voting + multi-landmark sampling cho ổn định. State machine
+> + smoother chỉ cần ≥6 FPS để hoạt động đúng → 10-12 FPS dư an toàn.
 
 Nếu chậm hơn:
-- Giảm `CAMERA_WIDTH/HEIGHT` xuống `640`/`480`
+- Giảm `CAMERA_WIDTH/HEIGHT` xuống `640`/`480` (giảm mediapipe ~50%)
 - Tăng `YOLO_EVERY` lên `10`
-- Setup NPU (mục 11) — sẽ tăng FPS YOLO lên ~10x
+- Tăng `CONFIRM_FRAMES` (ổn định hơn nhưng response chậm hơn)
+- Setup NPU (mục 11) — tăng FPS YOLO ~10x
 
 ---
 
@@ -360,34 +421,49 @@ chmod +x /opt/baby-monitor/run.sh
 ./run.sh
 ```
 
-### 9.2 Test 3 kịch bản cảnh báo
+### 9.2 Test 4 kịch bản cảnh báo
 
-1. **Histogram alert**: che mũi-miệng bằng tay/khăn (vẫn để mặt trong khung) → 15s → Telegram báo `MUI/MIENG BI CHE`
-2. **Face lost alert**: phủ chăn kín mặt → 15s → Telegram báo `Mất hoàn toàn khuôn mặt`
-3. **Rời khung (không alert)**: bước hẳn ra ngoài camera → state về `NO_FACE`, **không** gửi tin
+| # | Kịch bản | Kỳ vọng |
+|---|---|---|
+| 1 | **Mặt sạch ngồi yên 30s** | Debug bar votes = 0/4 hoặc 1/4. KHÔNG alert. |
+| 2 | **Tay che mũi/miệng 15s+** | Votes tăng lên 2-3/4 (đặc biệt `lap` giảm rõ). Sau 15s → Telegram alert `MUI/MIENG BI CHE` |
+| 3 | **Chăn phủ kín mặt 15s+** | Votes 4/4 ngay. Sau 15s → Telegram alert (hoặc `Mất hoàn toàn khuôn mặt` nếu mediapipe mất tracking) |
+| 4 | **Rời khung (KHÔNG alert)** | Bước hẳn ra ngoài camera → YOLO không thấy người → state `NO_FACE`, KHÔNG gửi tin |
 
-Mỗi alert lưu `events/possible_suffocation_risk_<timestamp>.jpg` + `.json`.
+Mỗi alert lưu `events/possible_suffocation_risk_<timestamp>.jpg` + `.json` (kèm tất cả 4 signal values).
 
-### 9.3 Headless (không màn hình)
+### 9.3 Recalibration (khi cần)
 
-App mặc định gọi `cv2.imshow()` để hiển thị live view. Trên server headless việc này sẽ lỗi `cannot connect to X server`. Có 2 cách xử lý:
+Calibration chỉ chạy 1 lần lúc khởi động. Nếu môi trường thay đổi (ánh sáng, vị trí trẻ, hoặc baseline drift sau lâu) → recalibrate:
 
-**A. Forward X qua SSH** (tạm thời, để test):
+- **GUI mode** (có HDMI): nhấn phím `R` trong cửa sổ video
+- **Headless mode** (systemd, không HDMI): gửi tín hiệu SIGUSR1
+  ```bash
+  pgrep -f "src/main.py"   # tìm PID
+  kill -USR1 <PID>          # trigger recalibrate
+  ```
+- **Auto-recalibrate**: app tự recal sau `AUTO_RECAL_AFTER_SEC` giây safe liên tục (default 30 phút). Tắt bằng `AUTO_RECAL_AFTER_SEC=0`.
+
+Sau khi nhận signal, app log:
+```
+🔄 Yêu cầu recalibrate: SIGUSR1
+🔄 Đã reset — sẽ calibrate lại khi thấy mặt.
+✅ Calibration xong! q=0.92 | hist_thresh nose=0.84 mouth=0.81 | ...
+```
+
+### 9.4 Headless mode (không màn hình)
+
+App đã có built-in HEADLESS support. Khi `HEADLESS=1` trong `.env`:
+- Không gọi `cv2.imshow()` / `cv2.waitKey()` → không cần X server
+- Hotkey `R` không hoạt động → dùng `kill -USR1 <pid>` để recalibrate (mục 9.3)
+
+Production setup (systemd) BẮT BUỘC set `HEADLESS=1`. Nếu để `0` mà không có X → app crash với `cv2.error: cannot connect to X server`.
+
+Nếu muốn xem live view khi debug, ssh X-forwarding:
 ```bash
 ssh -X pi@<opi-ip>
-./run.sh
+HEADLESS=0 ./run.sh
 ```
-
-**B. Disable imshow** (production): edit [src/main.py](src/main.py), bao quanh `cv2.imshow()` và `cv2.waitKey()` bằng:
-```python
-HEADLESS = os.environ.get("HEADLESS", "0") == "1"
-# ...
-if not HEADLESS:
-    cv2.imshow(...)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-```
-Rồi set `HEADLESS=1` trong `.env`.
 
 ---
 
@@ -547,13 +623,38 @@ Gọi `_trigger_relay()` trong nhánh `if result.should_alert` của `run()`. Pi
 
 ## 13. Troubleshooting
 
-### `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`
-- MediaPipe 0.10.x compile chống NumPy 1.x, nhưng pip lại cài NumPy 2.x → warning + có thể crash hoặc trả landmark sai
-- Fix: pin lại bản 1.x
+### `NumPy 2.x cannot be run...` / `opencv-python ... requires numpy>=2`
+- numpy / opencv ABI mismatch. Mediapipe cần `numpy<2`, opencv ≥4.11 cần `numpy>=2` → xung đột.
+- **Fix triệt để** (uninstall hết, cài lại đúng version):
   ```bash
-  pip install "numpy<2" --force-reinstall
+  bash scripts/fix_env.sh
   ```
-- `requirements.txt` đã pin `numpy<2` — nếu vẫn lỗi do cài trước đó: `pip install -r requirements.txt --force-reinstall`
+- Nếu script không có (deploy version cũ): chạy thủ công
+  ```bash
+  pip uninstall -y opencv-python opencv-contrib-python \
+      opencv-python-headless opencv-contrib-python-headless
+  pip install "numpy<2" "opencv-python<4.11" --force-reinstall
+  ```
+
+### App khởi động in `❌ OpenCV variant compile chống NumPy 2.x` rồi exit
+- Guard tầng 2 fire — opencv variant đang cài chưa < 4.11
+- Fix: `bash scripts/fix_env.sh`
+
+### App khởi động in `❌ Phát hiện nhiều opencv variant cài cùng lúc`
+- Có cả `opencv-python` và `opencv-contrib-python` cài → xung đột cv2 namespace
+- Fix: `bash scripts/fix_env.sh` (sẽ uninstall hết rồi cài lại 1 cái)
+
+### Tay che mũi/miệng NHƯNG không alert (false negative)
+- Kiểm tra debug bar: dòng `MOUTH` khi tay che, giá trị `lap=` phải giảm xuống < 50 → vote
+- Nếu `lap` của hand vẫn > 50: tăng `LAPVAR_ABSOLUTE_FLOOR` trong [src/occlusion_detector.py](src/occlusion_detector.py) (vd lên 80) → nhạy hơn
+- Nếu `edge` của hand > 0.020: tăng `EDGE_ABSOLUTE_FLOOR` (vd lên 0.030)
+- Nếu votes oscillate (lúc 2/4 lúc 1/4): giảm `CONFIRM_FRAMES` xuống `7-8`, tăng `SMOOTHER_MAX_MISS` lên `4-5`
+- Recalibrate nếu baseline xấu (nhấn `R` hoặc `kill -USR1`)
+
+### Mặt sạch nhưng vẫn alert (false positive)
+- `quality` trong debug bar < 0.5 → calibration kém → recalibrate trong điều kiện ổn định
+- Tăng `LAPVAR_ABSOLUTE_FLOOR` / `EDGE_ABSOLUTE_FLOOR` lên (bớt nhạy)
+- Tăng `CONFIRM_FRAMES` lên `15-20` (cần che lâu hơn để alert)
 
 ### `Could not find a version that satisfies the requirement mediapipe`
 - Python version sai (3.12+ chưa có wheel ARM64 cho mediapipe) → cài Python 3.11
@@ -612,23 +713,45 @@ Thường vì:
 Orange Pi 5 (RK3588, 8GB RAM)
 ├── Ubuntu 22.04 Server ARM64
 ├── Logitech USB webcam (USB 3.0)
-├── Module relay 4 kênh → GPIO (output cảnh báo cứng)
+├── Module relay 4 kênh → GPIO (output cảnh báo cứng) — optional, mục 12
 │
 ├── /opt/baby-monitor/
 │   ├── venv/                     ← Python 3.11 isolated env
-│   ├── src/main.py               ← entrypoint
-│   ├── src/state_machine.py      ← logic, đã test
-│   ├── .env                      ← config (token, camera, YOLO)
-│   ├── run.sh                    ← manual run
-│   ├── events/                   ← snapshot khi alert (rotate 30 ngày)
-│   ├── yolov8n.pt                ← (hoặc .rknn nếu setup NPU)
-│   └── tests/, scripts/
+│   ├── requirements.txt          ← deps pinned (numpy<2, opencv<4.11)
+│   ├── src/
+│   │   ├── main.py               ← entrypoint, 3 guard env, signal handlers
+│   │   ├── state_machine.py      ← FSM phát hiện ngạt thở
+│   │   └── occlusion_detector.py ← Multi-signal voting (hist+skin+edge+lap_var)
+│   ├── scripts/
+│   │   ├── fix_env.sh            ← Uninstall opencv variants + cài đúng version
+│   │   ├── test_webcam.py        ← Verify camera + FPS
+│   │   └── benchmark.py          ← Đo pipeline
+│   ├── tests/
+│   │   ├── test_state_machine.py        (11 test)
+│   │   └── test_occlusion_detector.py   (14 test)
+│   ├── .env                      ← config (token, camera, threshold, HEADLESS=1)
+│   ├── run.sh                    ← manual run wrapper
+│   ├── events/                   ← snapshot + JSON khi alert (rotate 30 ngày)
+│   ├── yolov8n.pt                ← person detection (hoặc .rknn nếu NPU)
+│   └── INSTALL.md                ← file này
 │
 └── systemd services:
-    ├── baby-monitor.service      ← autostart + restart on crash
+    ├── baby-monitor.service      ← autostart + restart on crash + SIGTERM clean
     ├── /etc/logrotate.d/...      ← rotate log 7 ngày
     └── cron: dọn events/         ← cleanup 2h sáng mỗi ngày
 ```
+
+### Multi-signal detection (mục 8.1)
+
+Mỗi frame, mỗi patch (mũi + 3 patch miệng) tính 4 signal:
+- **Histogram HSV correlation** — color distribution similarity với baseline
+- **Skin pixel ratio** — % pixel match skin HSV range (chăn/gối có skin% thấp)
+- **Edge density** (Canny) — % pixel có edge (chăn phẳng → ít edge)
+- **Laplacian variance** — variance của Laplacian filter (mặt có chi tiết nhỏ → high; tay back phẳng → low)
+
+Vote rule: ≥ 2/4 signal trong patch → occluded. **Bất kỳ** patch nào (mũi hoặc miệng) occluded → fire.
+
+Threshold ADAPTIVE từ calibration (mean - 3σ cho hist) + ABSOLUTE FLOOR cho edge (0.020) và lap_var (50) → tay (texture thấp) luôn vote dù baseline yếu.
 
 ---
 

@@ -21,7 +21,7 @@ import cv2
 
 from occlusion_detector import (
     OcclusionDetector, CheckResult, compute_signals,
-    NOSE_TIP, MOUTH_CENTER,
+    NOSE_TIP, MOUTH_CENTER, MOUTH_LANDMARK_INDICES,
     MIN_CALIB_SAMPLES,
 )
 
@@ -36,11 +36,18 @@ class FakeLandmark:
 
 
 def make_landmarks(nose=(0.5, 0.40), mouth=(0.5, 0.55), n_indices=20):
-    """List landmark, index NOSE_TIP/MOUTH_CENTER set, các index khác cũng có
-    (mediapipe có 478 landmark; ta chỉ dùng 2 nên 20 là đủ)."""
+    """List landmark mô phỏng mediapipe.
+       - NOSE_TIP (4)        — nose tip
+       - 13                  — upper lip top (slightly above mouth center)
+       - MOUTH_CENTER (14)   — mouth center
+       - 17                  — lower lip bottom (slightly below mouth center)
+    """
     lms = [FakeLandmark(0.0, 0.0) for _ in range(n_indices)]
     lms[NOSE_TIP]     = FakeLandmark(*nose)
     lms[MOUTH_CENTER] = FakeLandmark(*mouth)
+    # Multi-landmark sampling: 13 (upper) và 17 (lower) đặt sát mouth_center
+    lms[13] = FakeLandmark(mouth[0], mouth[1] - 0.025)
+    lms[17] = FakeLandmark(mouth[0], mouth[1] + 0.025)
     return lms
 
 
@@ -297,6 +304,49 @@ def test_check_on_hand_alerts():
           f"hand_lap nose={result.nose_lap_var:.0f} mouth={result.mouth_lap_var:.0f})")
 
 
+def test_hand_stability_under_landmark_drift():
+    """Mô phỏng landmark drift (hand position thay đổi nhẹ giữa các frame) —
+    detection PHẢI ổn định, không oscillate. Đây chính là bug user gặp:
+    'đôi khi cảnh báo, không ổn định'.
+
+    Multi-landmark sampling + MIN aggregation phải ensure tất cả frame đều vote
+    occluded dù landmark có dịch.
+    """
+    det = OcclusionDetector()
+    lms = make_landmarks()
+    f_face = face_frame()
+    h_, w_ = f_face.shape[:2]
+    for _ in range(MIN_CALIB_SAMPLES + 5):
+        det.add_calibration_sample(f_face, lms, w_, h_)
+    ok, _ = det.finalize_calibration()
+    assert ok
+
+    f_hand = hand_frame(w=w_, h=h_)
+    # Simulate landmark drift: jitter mouth landmark ±10px (≈ 0.03 normalized)
+    n_occluded = 0
+    n_total = 0
+    drifts = [(0.0, 0.0), (0.02, 0.0), (-0.02, 0.0), (0.0, 0.02), (0.0, -0.02),
+              (0.02, 0.02), (-0.02, -0.02), (0.0, 0.03), (0.03, 0.0)]
+    for dx, dy in drifts:
+        drifted = make_landmarks(
+            nose=(0.5, 0.40), mouth=(0.5 + dx, 0.55 + dy)
+        )
+        r = det.check(f_hand, drifted, w_, h_, prev_in_alert=False)
+        if r is None:
+            continue
+        n_total += 1
+        if r.occluded:
+            n_occluded += 1
+    # Yêu cầu: ít nhất 90% frame phải vote occluded (ổn định cao)
+    rate = n_occluded / max(n_total, 1)
+    assert rate >= 0.9, (
+        f"❌ Chỉ {n_occluded}/{n_total} frame vote occluded ({rate*100:.0f}%) — "
+        f"chưa đủ ổn định. Mong ≥ 90%."
+    )
+    print(f"✅ test_hand_stability_under_landmark_drift  "
+          f"({n_occluded}/{n_total} frame occluded = {rate*100:.0f}%)")
+
+
 def test_reset_clears_state():
     """reset() đưa detector về not ready, samples sạch."""
     det = OcclusionDetector()
@@ -356,6 +406,7 @@ if __name__ == "__main__":
         test_check_on_blanket_alerts,
         test_check_on_red_blanket_still_alerts,
         test_check_on_hand_alerts,
+        test_hand_stability_under_landmark_drift,
         test_reset_clears_state,
         test_check_returns_none_before_ready,
         test_baseline_does_not_update_in_alert,

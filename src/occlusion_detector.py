@@ -37,6 +37,12 @@ from typing import Optional
 NOSE_TIP     = 4
 MOUTH_CENTER = 14
 
+# Multi-landmark sampling cho mouth — robust khi mediapipe nhảy landmark
+# giữa các vị trí khác nhau trên tay che mặt. Lấy 3 patch: lip trên, giữa,
+# lip dưới. Detection aggregate bằng MIN (worst-case patch) cho edge/lap_var.
+MOUTH_LANDMARK_INDICES = [13, 14, 17]   # upper lip top / mouth center / lower lip bottom
+NOSE_LANDMARK_INDICES  = [4]            # nose tip is enough (nhỏ hơn)
+
 PATCH_SIZE = 50
 
 # Skin tone HSV ranges. Hue wraps quanh 0/180 (red), cần 2 range.
@@ -57,8 +63,14 @@ MIN_CALIB_SAMPLES        = 30
 K_HIST                   = 3.0
 # Skin/edge/lap_var: alert khi drop > FRAC × baseline
 SKIN_DROP_FRAC           = 0.45
-EDGE_DROP_FRAC           = 0.40   # giảm từ 0.50 — edge dễ bị che dù không che
-LAPVAR_DROP_FRAC         = 0.40   # signal mới: variance giảm 40% = bị che
+EDGE_DROP_FRAC           = 0.30   # tighter
+LAPVAR_DROP_FRAC         = 0.50   # tighter — bị che = drop ≥ 50% variance
+
+# ABSOLUTE FLOORS — bảo đảm hand detection ổn định bất kể baseline thấp.
+# Nếu signal < floor → vote chắc chắn dù relative drop chưa đủ.
+# Giá trị calibrate cho real-world: hand back có lap_var ~10-60 / edge ~0.5-2%
+EDGE_ABSOLUTE_FLOOR      = 0.020   # 2% pixel có edge — hand thường 0.5-1.5%
+LAPVAR_ABSOLUTE_FLOOR    = 50.0    # hand thường 10-50, mặt thường 200+
 
 # Conservative baseline update:
 BASELINE_UPDATE_CORR_MIN = 0.92    # chỉ update khi rất confident SAFE
@@ -115,6 +127,31 @@ def compute_signals(patch_bgr) -> dict:
 
 def _hist_corr(h1, h2) -> float:
     return float(cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL))
+
+
+def _aggregate_avg(sigs_list: list[dict]) -> dict:
+    """Aggregate cho CALIBRATION — dùng AVG để capture face state tiêu biểu."""
+    hist = np.mean([s['hist'] for s in sigs_list], axis=0).astype(np.float32)
+    return {
+        'hist':         hist,
+        'skin_ratio':   float(np.mean([s['skin_ratio']   for s in sigs_list])),
+        'edge_density': float(np.mean([s['edge_density'] for s in sigs_list])),
+        'lap_var':      float(np.mean([s['lap_var']      for s in sigs_list])),
+    }
+
+
+def _aggregate_for_detection(sigs_list: list[dict]) -> dict:
+    """Aggregate cho DETECTION — robust với landmark drift:
+       - Hist + skin: dùng MEAN (color-based, smoother)
+       - Edge + lap_var: dùng MIN (texture-based, worst-case = most suspicious)
+    """
+    hist = np.mean([s['hist'] for s in sigs_list], axis=0).astype(np.float32)
+    return {
+        'hist':         hist,
+        'skin_ratio':   float(np.mean([s['skin_ratio']  for s in sigs_list])),
+        'edge_density': float(min([s['edge_density'] for s in sigs_list])),
+        'lap_var':      float(min([s['lap_var']      for s in sigs_list])),
+    }
 
 
 # ---------- data classes ----------
@@ -181,14 +218,28 @@ class OcclusionDetector:
         self._frames_since_last_alert = 10**9
 
     def add_calibration_sample(self, frame, landmarks, w, h):
+        """Mỗi frame:
+        - Nose: 1 landmark (NOSE_TIP) → 1 sample
+        - Mouth: 3 landmark (upper/center/lower lip) → aggregate = AVG → 1 sample
+        """
         if self.is_ready:
             return
-        for idx, samples in ((NOSE_TIP, self._samples_nose),
-                             (MOUTH_CENTER, self._samples_mouth)):
+
+        # Nose
+        for idx in NOSE_LANDMARK_INDICES:
             patch = extract_patch(frame, landmarks[idx], w, h)
-            if patch is None:
-                continue
-            samples.append(compute_signals(patch))
+            if patch is not None:
+                self._samples_nose.append(compute_signals(patch))
+
+        # Mouth: aggregate multi-landmark with AVG (capture typical face state)
+        mouth_patch_sigs = []
+        for idx in MOUTH_LANDMARK_INDICES:
+            patch = extract_patch(frame, landmarks[idx], w, h)
+            if patch is not None:
+                mouth_patch_sigs.append(compute_signals(patch))
+        if mouth_patch_sigs:
+            agg = _aggregate_avg(mouth_patch_sigs)
+            self._samples_mouth.append(agg)
 
     def finalize_calibration(self) -> tuple[bool, str]:
         """Tính baseline + threshold + quality. Trả về (success, message)."""
@@ -252,9 +303,10 @@ class OcclusionDetector:
                 f"(quá cao). Giữ yên mặt trẻ + tránh đèn nhấp nháy + calibrate lại."
             )
 
-        skin_min    = max(0.05, mean_skin * (1.0 - SKIN_DROP_FRAC))
-        edge_min    = max(0.005, mean_edge * (1.0 - EDGE_DROP_FRAC))
-        lap_var_min = max(5.0,   mean_lap  * (1.0 - LAPVAR_DROP_FRAC))
+        skin_min    = max(0.05,                  mean_skin * (1.0 - SKIN_DROP_FRAC))
+        # Absolute floor → đảm bảo hand luôn vote dù baseline thấp
+        edge_min    = max(EDGE_ABSOLUTE_FLOOR,   mean_edge * (1.0 - EDGE_DROP_FRAC))
+        lap_var_min = max(LAPVAR_ABSOLUTE_FLOOR, mean_lap  * (1.0 - LAPVAR_DROP_FRAC))
 
         # Quality 0..1 dựa trên độ ổn định
         hist_q = max(0.0, min(1.0, 1.0 - std_corr / 0.15))
@@ -283,13 +335,26 @@ class OcclusionDetector:
         if not self.is_ready:
             return None
 
-        nose_patch  = extract_patch(frame, landmarks[NOSE_TIP],    w, h)
-        mouth_patch = extract_patch(frame, landmarks[MOUTH_CENTER], w, h)
-        if nose_patch is None or mouth_patch is None:
+        # Nose: single landmark
+        nose_patches_sigs = []
+        for idx in NOSE_LANDMARK_INDICES:
+            patch = extract_patch(frame, landmarks[idx], w, h)
+            if patch is not None:
+                nose_patches_sigs.append(compute_signals(patch))
+        if not nose_patches_sigs:
             return None
+        nose_sigs = _aggregate_for_detection(nose_patches_sigs)
 
-        nose_sigs  = compute_signals(nose_patch)
-        mouth_sigs = compute_signals(mouth_patch)
+        # Mouth: multi-landmark, MIN aggregation cho edge/lap_var → robust với
+        # landmark drift trên bề mặt tay
+        mouth_patches_sigs = []
+        for idx in MOUTH_LANDMARK_INDICES:
+            patch = extract_patch(frame, landmarks[idx], w, h)
+            if patch is not None:
+                mouth_patches_sigs.append(compute_signals(patch))
+        if not mouth_patches_sigs:
+            return None
+        mouth_sigs = _aggregate_for_detection(mouth_patches_sigs)
 
         # === Compute correlations ===
         nose_corr  = _hist_corr(nose_sigs['hist'],  self.nose.hist)

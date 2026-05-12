@@ -94,7 +94,8 @@ OCCLUSION_THRESHOLD_SEC = int(os.environ.get("OCCLUSION_THRESHOLD_SEC", "15"))
 COOLDOWN_SEC            = int(os.environ.get("COOLDOWN_SEC",            "60"))
 
 CALIBRATION_SEC         = int(os.environ.get("CALIBRATION_SEC",         "5"))
-CONFIRM_FRAMES          = int(os.environ.get("CONFIRM_FRAMES",          "15"))
+CONFIRM_FRAMES          = int(os.environ.get("CONFIRM_FRAMES",          "10"))
+SMOOTHER_MAX_MISS       = int(os.environ.get("SMOOTHER_MAX_MISS",       "3"))
 MIN_QUALITY_WARN        = float(os.environ.get("MIN_QUALITY_WARN",      "0.5"))
 
 FACE_LOST_GRACE_SEC     = 1.5
@@ -134,7 +135,7 @@ class SmoothingBuffer:
     Yêu cầu: ≥ (confirm - max_miss) trong window confirm gần nhất để CONFIRM.
     """
 
-    def __init__(self, confirm=CONFIRM_FRAMES, clear=8, max_miss=2):
+    def __init__(self, confirm=CONFIRM_FRAMES, clear=8, max_miss=SMOOTHER_MAX_MISS):
         self.buf      = []
         self.confirm  = confirm
         self.clear    = clear
