@@ -84,6 +84,15 @@ from occlusion_detector import (
 )
 
 # ===================== CONFIG =====================
+# Defaults được tune sẵn cho Orange Pi 5 (RK3588, CPU-only). Mỗi giá trị
+# vẫn override được qua env nếu chạy dev trên máy khác, nhưng deploy production
+# trên OPi KHÔNG cần file .env nào — chạy thẳng src/main.py là xong.
+#
+# NVIDIA/CUDA: KHÔNG hỗ trợ. Project chạy hoàn toàn CPU.
+#   - MediaPipe FaceMesh: tối ưu sẵn cho ARM CPU.
+#   - YOLOv8n: model nano (~6MB), CPU đủ nhanh khi YOLO_EVERY=5.
+#   - Muốn tăng tốc trên RK3588 → dùng NPU 6 TOPS qua RKNN (xem INSTALL.md §11).
+
 TELEGRAM_TOKEN = os.environ.get(
     "TELEGRAM_TOKEN",
     "8684958351:AAHE0XavsY_DgzEevmtcMUHB3_N3QwuNYIk",
@@ -105,19 +114,20 @@ FACE_GONE_RESET_SEC     = OCCLUSION_THRESHOLD_SEC + 10
 # dần). 0 = tắt. Default 30 phút.
 AUTO_RECAL_AFTER_SEC    = int(os.environ.get("AUTO_RECAL_AFTER_SEC", "1800"))
 
-# YOLO settings (optional)
+# YOLO settings (CPU-only). Default run_every=5 frame để giảm tải trên ARM CPU.
 YOLO_PERSON_CONF        = 0.35
-YOLO_RUN_EVERY_N_FRAMES = int(os.environ.get("YOLO_EVERY", "0")) or None
+YOLO_RUN_EVERY_N_FRAMES = int(os.environ.get("YOLO_EVERY", "5"))
 YOLO_CACHE_TTL_SEC      = 1.0
-YOLO_DEVICE             = os.environ.get("YOLO_DEVICE", "auto")
 
-# Camera
+# Camera defaults cho Logitech webcam qua USB 3.0 trên OPi 5
 CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "0")
 CAMERA_WIDTH  = int(os.environ.get("CAMERA_WIDTH",  "1280"))
 CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT",  "720"))
 CAMERA_FPS    = int(os.environ.get("CAMERA_FPS",     "30"))
 
-HEADLESS = os.environ.get("HEADLESS", "0").lower() in ("1", "true", "yes")
+# Production trên OPi không có HDMI → default headless=1.
+# Dev local muốn xem live view: set HEADLESS=0 khi chạy.
+HEADLESS = os.environ.get("HEADLESS", "1").lower() in ("1", "true", "yes")
 
 # Detection mode — chọn cách phát hiện che mũi/miệng:
 #   "multi_signal" (default): 4-signal voting (histogram + skin + edge + lap_var).
@@ -185,27 +195,15 @@ class SmoothingBuffer:
         self.state = False
 
 
-def _resolve_yolo_device(requested: str) -> str:
-    if requested == "cpu":
-        return "cpu"
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda:0"
-    except Exception:
-        pass
-    if requested == "cuda":
-        print("⚠️  YOLO_DEVICE=cuda nhưng torch.cuda không available → fallback cpu")
-    return "cpu"
-
-
 class PersonDetector:
-    """YOLO wrapper — chỉ dùng khi mất mặt để phân biệt 'rời khung' vs 'bị phủ'."""
+    """YOLO wrapper — chỉ dùng khi mất mặt để phân biệt 'rời khung' vs 'bị phủ'.
+    CPU-only: project không hỗ trợ NVIDIA GPU, RK3588 không có CUDA.
+    """
 
     def __init__(self, model_path: Path):
         self.model        = None
         self.device       = "cpu"
-        self.run_every    = 5
+        self.run_every    = YOLO_RUN_EVERY_N_FRAMES
         self._last_call_t = 0.0
         self._last_result = None
         self._frame_count = 0
@@ -219,13 +217,8 @@ class PersonDetector:
             print(f"⚠️  Không thấy model {model_path.name}; YOLO bị tắt.")
             return
         try:
-            self.device = _resolve_yolo_device(YOLO_DEVICE)
-            self.model  = YOLO(str(model_path))
+            self.model = YOLO(str(model_path))
             self.model.to(self.device)
-            if YOLO_RUN_EVERY_N_FRAMES is not None:
-                self.run_every = YOLO_RUN_EVERY_N_FRAMES
-            else:
-                self.run_every = 2 if self.device.startswith("cuda") else 5
             print(f"✅ YOLO sẵn sàng: {model_path.name} | "
                   f"device={self.device} | run_every={self.run_every}")
         except Exception as e:
@@ -246,7 +239,7 @@ class PersonDetector:
         try:
             results = self.model(
                 frame, classes=[0], conf=YOLO_PERSON_CONF,
-                device=self.device, verbose=False,
+                device="cpu", verbose=False,
             )
             found = False
             for r in results:

@@ -4,4 +4,11 @@ mediapipe>=0.10
 # warning "cannot be run in NumPy 2.x" và có thể crash/sai landmark.
 numpy>=1.24,<2
 python-telegram-bot>=20
-ultralytics>=8.0
+
+# torch<2.4 BẮT BUỘC — từ torch 2.4 trở đi, wheel Linux liệt kê
+# nvidia-cudnn-cu13 (~433MB), nvidia-cublas-cu12, cuda_toolkit... là hard
+# dependency và pip resolver SẼ tải về dù project chạy CPU-only. Trên Orange Pi
+# có /tmp tmpfs ~1GB → fail với "No space left on device".
+# torch 2.3.x trên aarch64 KHÔNG kéo nvidia-* nào.
+torch>=2.0,<2.4
+ultralytics>=8.0,<8.3   # 8.3+ yêu cầu torch>=2.4

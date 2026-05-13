@@ -10,13 +10,18 @@ Phiên bản cài đặt cho board nhúng **Orange Pi 5 / 5B / 5 Plus** (RK3588 
 4. [Cài system dependencies](#4-cài-system-dependencies)
 5. [Cài Python + project dependencies](#5-cài-python--project-dependencies)
 6. [Tạo Telegram bot + lấy token](#6-tạo-telegram-bot--lấy-token)
-7. [Cấu hình bằng `.env`](#7-cấu-hình-bằng-env)
+7. [(Optional) Cấu hình tùy chỉnh qua `.env`](#7-optional-cấu-hình-tùy-chỉnh-qua-env)
 8. [Verify cài đặt](#8-verify-cài-đặt)
 9. [Chạy chương trình](#9-chạy-chương-trình)
 10. [Autostart bằng systemd](#10-autostart-bằng-systemd)
 11. [(Optional) Tăng tốc bằng NPU RK3588](#11-optional-tăng-tốc-bằng-npu-rk3588)
 12. [(Optional) Kích relay khi có cảnh báo](#12-optional-kích-relay-khi-có-cảnh-báo)
 13. [Troubleshooting](#13-troubleshooting)
+
+> 📌 **CPU-only**: Project KHÔNG hỗ trợ NVIDIA GPU (RK3588 không có CUDA).
+> Toàn bộ pipeline chạy trên CPU; muốn tăng tốc YOLO trên OPi 5 → dùng NPU 6 TOPS qua RKNN (§11).
+>
+> 📌 **Default cài sẵn cho OPi**: tất cả config (HEADLESS=1, CAMERA, threshold, YOLO_EVERY=5...) đã hardcode default phù hợp Orange Pi trong [src/main.py](src/main.py). **Không cần tạo file `.env`** — chạy thẳng `python src/main.py` là chạy được. File `.env` chỉ cần khi muốn override (xem §7).
 
 ---
 
@@ -171,6 +176,16 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
 
 ### 5.1 Clone source code
 
+Để **đâu cũng được** — chọn 1 trong 2:
+
+**Option A — đặt vào `~/Documents/` (mặc định Orange Pi)**:
+```bash
+cd ~/Documents
+git clone <your-repo-url> baby-ai-alert
+cd baby-ai-alert
+```
+
+**Option B — đặt vào `/opt/baby-monitor` (production chuẩn Linux)**:
 ```bash
 cd /opt
 sudo git clone <your-repo-url> baby-monitor
@@ -178,69 +193,103 @@ sudo chown -R $USER:$USER baby-monitor
 cd baby-monitor
 ```
 
-(Hoặc copy thư mục `baby-ai-alert/` từ máy dev qua bằng `scp`/`rsync`.)
+> Trong các bước sau, `$PROJECT_DIR` = path bạn chọn (vd `~/Documents/baby-ai-alert` hoặc `/opt/baby-monitor`). Path không đổi behavior của app vì dùng path tương đối từ `__file__`.
 
-### 5.2 Tạo virtualenv
+### 5.2 Cài 1 phát ăn ngay (KHUYẾN NGHỊ)
 
+Project đã có script tự động xử lý mọi case kinh điển trên OPi (tmpfs RAM đầy, torch kéo nvidia-cudnn, pip cache hỏng...):
+
+```bash
+bash scripts/install_opi.sh
+```
+
+Script này tự động:
+1. Set `TMPDIR=$HOME/tmp` (tránh `/tmp` tmpfs 990MB đầy khi cài torch)
+2. Tạo venv nếu chưa có
+3. Upgrade pip + wheel
+4. Uninstall mọi `torch`, `nvidia-*`, `cuda-toolkit`, `triton` cũ (nếu lỡ cài)
+5. Clear pip cache (xoá wheel hỏng / nvidia bloat)
+6. Cài `torch>=2.0,<2.4` TRƯỚC (chặn ultralytics pull torch ≥2.4 kéo nvidia_cudnn)
+7. Cài rest từ `requirements.txt`
+8. Verify numpy/opencv version + smoke test import tất cả lib
+
+Hết. Nếu script báo ✅ thì sang §6 (Telegram).
+
+Nếu báo lỗi, đọc kỹ message — script chỉ rõ lệnh fix.
+
+### 5.3 (Alternative) Cài thủ công từng bước
+
+Chỉ làm khi không muốn dùng `install_opi.sh`, hoặc đang debug.
+
+**5.3.1 Tạo virtualenv:**
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip wheel setuptools
 ```
 
-### 5.3 Cài MediaPipe ARM64 — phần khó nhất
-
-MediaPipe có wheel cho `aarch64` từ phiên bản 0.10.x trở đi nhưng chỉ hỗ trợ Python **3.9 - 3.11**. Kiểm tra Python version:
-
+**5.3.2 Kiểm tra Python version (MediaPipe ARM64 cần 3.9-3.11):**
 ```bash
 python --version
 ```
 
-- Nếu là 3.10 hoặc 3.11 → cài bình thường:
-  ```bash
-  pip install mediapipe
-  ```
-- Nếu Python 3.12+ → cài Python 3.11 song song:
-  ```bash
-  sudo apt install -y python3.11 python3.11-venv python3.11-dev
-  python3.11 -m venv venv
-  source venv/bin/activate
-  pip install --upgrade pip
-  pip install mediapipe
-  ```
+Nếu Python 3.12+ → cài Python 3.11 song song:
+```bash
+sudo apt install -y python3.11 python3.11-venv python3.11-dev
+python3.11 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+```
 
-### 5.4 Cài deps từ `requirements.txt`
+**5.3.3 Chuẩn bị disk space (BẮT BUỘC trên OPi):**
+
+Trên ARM Linux, pip giải nén wheel ở `/tmp` là **tmpfs (RAM)** chỉ ~990MB. Wheel torch (419MB) + extract có thể vượt quá → `[Errno 28] No space left on device` dù disk còn nhiều GB.
 
 ```bash
-pip install -r requirements.txt
+mkdir -p $HOME/tmp
+export TMPDIR=$HOME/tmp
+pip cache purge
+```
+
+**5.3.4 Cài torch CPU-only TRƯỚC** (quan trọng):
+```bash
+pip install --no-cache-dir 'torch>=2.0,<2.4'
+```
+
+> 🚫 Nếu thấy pip đang download `nvidia_cudnn_cu13-*.whl` (433MB) hoặc `cuda_toolkit-*.whl` → **Ctrl+C ngay**. Đó là dấu hiệu pin torch không có hiệu lực. Kiểm tra `requirements.txt` đã pull commit mới chưa (`git pull`).
+
+**5.3.5 Cài rest từ requirements.txt:**
+```bash
+pip install --no-cache-dir -r requirements.txt
 ```
 
 `requirements.txt` đã pin sẵn:
 - `numpy>=1.24,<2`  ← mediapipe 0.10.x compile chống NumPy 1.x
 - `opencv-python>=4.8,<4.11`  ← opencv ≥4.11 compile chống NumPy 2.x
-- `mediapipe>=0.10`, `python-telegram-bot>=20`, `ultralytics>=8.0`
+- `torch>=2.0,<2.4`  ← **quan trọng**: torch ≥2.4 pull `nvidia-cudnn-cu13` ~433MB dù CPU-only
+- `ultralytics>=8.0,<8.3`  ← ultralytics ≥8.3 yêu cầu torch ≥2.4
+- `mediapipe>=0.10`, `python-telegram-bot>=20`
 
-> **Lưu ý**: `ultralytics` kéo PyTorch. Trên ARM64, pip sẽ cài bản **CPU-only** (~200MB) — đúng rồi, RK3588 không có CUDA. Tăng tốc qua NPU làm ở mục 11.
-
-### 5.5 Verify + fix version conflicts
+### 5.4 Verify + fix version conflicts
 
 ```bash
 bash scripts/fix_env.sh
 ```
 
 Script này tự động:
-- Uninstall **tất cả** opencv variant (`opencv-python`, `opencv-contrib-python`, `opencv-python-headless`, `opencv-contrib-python-headless`) để clean slate
+- Uninstall **tất cả** opencv variant để clean slate
+- Uninstall mọi `nvidia-*` / `cuda-toolkit` / `triton` lỡ cài
 - Cài lại `numpy<2` + `opencv-python<4.11` để đảm bảo binary tương thích
 - In version cuối cùng để verify
 
 Sau đó verify import:
 ```bash
-python -c "import cv2, mediapipe, numpy, telegram, ultralytics; print('All imports OK')"
+python -c "import cv2, mediapipe, numpy, telegram, ultralytics, torch; print('All imports OK')"
 ```
 
 Phải in `All imports OK`. Nếu fail → xem mục 13 (Troubleshooting).
 
-### 5.6 (Tự động) App có 3 lớp guard chặn env sai
+### 5.5 (Tự động) App có 3 lớp guard chặn env sai
 
 `src/main.py` tự refuse to start nếu phát hiện:
 1. `numpy >= 2` (mediapipe sẽ crash)
@@ -278,55 +327,51 @@ Phải nhận tin "test from opi" trong Telegram.
 
 ---
 
-## 7. Cấu hình bằng `.env`
+## 7. (Optional) Cấu hình tùy chỉnh qua `.env`
+
+**Không bắt buộc**. Tất cả default đã hardcode sẵn trong [src/main.py](src/main.py) phù hợp Orange Pi 5 production:
+
+| Biến | Default (built-in) | Tác dụng |
+|---|---|---|
+| `TELEGRAM_TOKEN` | Đã có sẵn 1 token demo | Token Telegram bot — **NÊN thay** trước khi deploy thật |
+| `TELEGRAM_CHAT_ID` | Đã có sẵn chat ID demo | Chat ID để gửi alert — **NÊN thay** trước khi deploy thật |
+| `CAMERA_SOURCE` | `0` | `0`/`/dev/video0`/`rtsp://...` |
+| `CAMERA_WIDTH/HEIGHT/FPS` | 1280 / 720 / 30 | Giảm xuống 640/480/15 nếu OPi yếu |
+| `HEADLESS` | **`1`** | `1` = không mở cửa sổ (mặc định cho OPi). Set `0` khi dev có HDMI |
+| `DETECTION_MODE` | `multi_signal` | `multi_signal` (4-signal voting) hoặc `strict` (chỉ dùng face_mesh confidence cao 0.85) |
+| `OCCLUSION_THRESHOLD_SEC` | `15` | Ngưỡng giây để alert |
+| `CALIBRATION_SEC` | `5` | Thời gian calibrate ban đầu |
+| `CONFIRM_FRAMES` | `10` | Tăng → ổn định hơn, chậm hơn 0.3s |
+| `SMOOTHER_MAX_MISS` | `3` | Cho phép landmark jumpy 3 frame không reset đếm |
+| `AUTO_RECAL_AFTER_SEC` | `1800` | Auto-recalib sau 30 phút safe liên tục (0 = tắt) |
+| `MIN_QUALITY_WARN` | `0.5` | Quality < ngưỡng → cảnh báo UI gợi ý recalib |
+| `MP_DETECTION_CONFIDENCE` | `0.6` | MediaPipe min detection confidence (chỉ áp dụng khi `multi_signal`; `strict` luôn dùng 0.85) |
+| `MP_TRACKING_CONFIDENCE` | `0.6` | MediaPipe min tracking confidence (tương tự) |
+| `YOLO_EVERY` | `5` | YOLO chạy mỗi N frame để đỡ tải CPU |
+
+> 🚫 **KHÔNG còn `YOLO_DEVICE`**. Project CPU-only, không hỗ trợ NVIDIA GPU. Muốn tăng tốc → NPU RK3588 (§11).
+
+### Khi nào CẦN tạo `.env`
+
+Chỉ tạo khi muốn:
+- Đổi token Telegram (production thật, không dùng token demo)
+- Override resolution/threshold cho hardware yếu hơn
+- Bật mode `strict` thay `multi_signal`
 
 ```bash
 cat > /opt/baby-monitor/.env << 'EOF'
-# ---- Bắt buộc ----
 TELEGRAM_TOKEN=1234567890:ABC...
 TELEGRAM_CHAT_ID=7316578932
 
-# ---- Camera ----
-CAMERA_SOURCE=0
-CAMERA_WIDTH=1280
-CAMERA_HEIGHT=720
-CAMERA_FPS=30
-
-# ---- Headless (bắt buộc cho systemd, không có HDMI) ----
-HEADLESS=1
-
-# ---- Detection logic ----
-OCCLUSION_THRESHOLD_SEC=15   # bao nhiêu giây bị che thì alert
-CALIBRATION_SEC=5            # thời gian calibrate ban đầu
-CONFIRM_FRAMES=10            # frame confirm bị che (tăng = ổn hơn, chậm hơn)
-SMOOTHER_MAX_MISS=3          # cho phép N frame miss trong window confirm
-MIN_QUALITY_WARN=0.5         # quality < này → warn UI gợi ý recalib
-AUTO_RECAL_AFTER_SEC=1800    # auto-recalibrate sau N giây safe liên tục (0=tắt)
-
-# ---- YOLO ----
-YOLO_DEVICE=cpu              # cpu | cuda (chỉ cuda sau khi setup RKNN)
-YOLO_EVERY=5                 # chạy YOLO mỗi N frame để đỡ tải
-
-PYTHONIOENCODING=utf-8
+# Giảm load nếu OPi 4GB / không tản nhiệt tốt
+# CAMERA_WIDTH=640
+# CAMERA_HEIGHT=480
+# CAMERA_FPS=15
+# YOLO_EVERY=10
 EOF
 
 chmod 600 /opt/baby-monitor/.env   # bảo vệ token
 ```
-
-| Biến | Default | Tác dụng |
-|---|---|---|
-| `CAMERA_SOURCE` | `0` | `0`/`/dev/video0`/`rtsp://...` |
-| `CAMERA_WIDTH/HEIGHT/FPS` | 1280/720/30 | Giảm xuống 640/480/15 nếu OPi yếu |
-| `HEADLESS` | `0` | **Phải set `1` trên systemd** (không có X server) |
-| `DETECTION_MODE` | `multi_signal` | `multi_signal` (4-signal voting) hoặc `strict` (chỉ dùng face_mesh confidence cao 0.85) |
-| `OCCLUSION_THRESHOLD_SEC` | `15` | Ngưỡng giây để alert |
-| `CONFIRM_FRAMES` | `10` | Tăng → ổn định hơn, chậm hơn 0.3s |
-| `SMOOTHER_MAX_MISS` | `3` | Cho phép landmark jumpy 3 frame không reset đếm |
-| `AUTO_RECAL_AFTER_SEC` | `1800` | Auto-recalib sau 30 phút safe liên tục |
-| `MP_DETECTION_CONFIDENCE` | `0.6` | MediaPipe min detection confidence (chỉ áp dụng khi `multi_signal`; `strict` luôn dùng 0.85) |
-| `MP_TRACKING_CONFIDENCE` | `0.6` | MediaPipe min tracking confidence (tương tự) |
-| `YOLO_DEVICE` | `cpu` | `cuda` sau khi setup RKNN |
-| `YOLO_EVERY` | `5` | YOLO chạy mỗi 5 frame |
 
 ### So sánh 2 detection modes
 
@@ -419,21 +464,31 @@ Nếu chậm hơn:
 
 ## 9. Chạy chương trình
 
-### 9.1 Load `.env` và chạy
+### 9.1 Chạy trực tiếp (không cần `.env`)
 
-Tạo `/opt/baby-monitor/run.sh`:
 ```bash
+cd /opt/baby-monitor
+source venv/bin/activate
+python src/main.py
+```
+
+Mặc định: HEADLESS=1, camera index 0, alert sau 15s — đã tune sẵn cho OPi 5.
+
+### 9.1.1 (Optional) Có `.env` thì dùng `run.sh`
+
+Nếu §7 đã tạo `.env` để override token/setting, dùng wrapper sau:
+
+```bash
+cat > /opt/baby-monitor/run.sh << 'EOF'
 #!/bin/bash
 set -e
 cd /opt/baby-monitor
-set -a
-source .env
-set +a
+if [ -f .env ]; then
+    set -a; source .env; set +a
+fi
 source venv/bin/activate
 exec python src/main.py
-```
-
-```bash
+EOF
 chmod +x /opt/baby-monitor/run.sh
 ./run.sh
 ```
@@ -470,16 +525,14 @@ Sau khi nhận signal, app log:
 
 ### 9.4 Headless mode (không màn hình)
 
-App đã có built-in HEADLESS support. Khi `HEADLESS=1` trong `.env`:
+App **default HEADLESS=1** — không cần config gì. Khi headless:
 - Không gọi `cv2.imshow()` / `cv2.waitKey()` → không cần X server
 - Hotkey `R` không hoạt động → dùng `kill -USR1 <pid>` để recalibrate (mục 9.3)
 
-Production setup (systemd) BẮT BUỘC set `HEADLESS=1`. Nếu để `0` mà không có X → app crash với `cv2.error: cannot connect to X server`.
-
-Nếu muốn xem live view khi debug, ssh X-forwarding:
+Nếu muốn xem live view khi debug (ssh X-forwarding hoặc HDMI gắn trực tiếp):
 ```bash
 ssh -X pi@<opi-ip>
-HEADLESS=0 ./run.sh
+HEADLESS=0 python src/main.py
 ```
 
 ---
@@ -499,7 +552,9 @@ Type=simple
 User=pi
 Group=video
 WorkingDirectory=/opt/baby-monitor
-EnvironmentFile=/opt/baby-monitor/.env
+# EnvironmentFile chỉ cần nếu §7 đã tạo .env để override default.
+# `-` prefix = không fail nếu file không tồn tại (default phù hợp OPi đã có sẵn trong code).
+EnvironmentFile=-/opt/baby-monitor/.env
 ExecStart=/opt/baby-monitor/venv/bin/python /opt/baby-monitor/src/main.py
 Restart=always
 RestartSec=10
@@ -681,6 +736,56 @@ Gọi `_trigger_relay()` trong nhánh `if result.should_alert` của `run()`. Pi
 - Hết RAM → tạo swap (mục 3.4)
 - Cài từng package một thay vì một lệnh dài
 
+### `ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device`
+
+Đây là lỗi PHỔ BIẾN trên Orange Pi. Có 2 nguyên nhân, fix khác nhau:
+
+**Nguyên nhân A — `/tmp` (tmpfs RAM) đầy**:
+```bash
+df -h /tmp
+# Nếu /tmp là tmpfs ~1GB và bạn đang cài torch (419MB wheel) → đầy
+```
+Fix:
+```bash
+mkdir -p $HOME/tmp
+export TMPDIR=$HOME/tmp
+pip cache purge
+pip install --no-cache-dir -r requirements.txt
+```
+
+**Nguyên nhân B — pip đang kéo về `nvidia_cudnn_cu13` 433MB (vô dụng trên ARM CPU-only)**:
+
+Nhìn log pip, nếu thấy:
+```
+Downloading nvidia_cudnn_cu13-9.19.0.56-py3-none-manylinux_2_27_aarch64.whl (433 MB)
+Using cached cuda_toolkit-13.0.2-py2.py3-none-any.whl
+Using cached torch-2.11.0-...
+```
+
+→ `torch>=2.4` declare nvidia-cudnn là hard dep. Project CPU-only KHÔNG cần. Fix:
+
+```bash
+# Stop pip
+# Pull source mới nhất (requirements.txt đã pin torch<2.4)
+git pull
+
+# Xoá hết torch + nvidia* đã cài lỡ
+pip uninstall -y torch torchvision torchaudio
+pip list | grep -Ei "nvidia|cuda" | awk '{print $1}' | xargs -r pip uninstall -y
+
+pip cache purge
+pip install --no-cache-dir -r requirements.txt
+```
+
+Hoặc chạy thẳng `bash scripts/fix_env.sh` — script này đã được cập nhật để uninstall mọi `nvidia-*` / `cuda-*` package lỡ cài.
+
+### Sau khi cài `pip list | grep -i nvidia` ra kết quả
+- Bạn cài nhầm torch≥2.4 → nvidia-cudnn-cu13, nvidia-cublas-cu12, ... ăn ~1.5GB disk vô ích
+- Fix: `bash scripts/fix_env.sh` (auto uninstall) hoặc thủ công:
+  ```bash
+  pip list | grep -Ei "nvidia|cuda" | awk '{print $1}' | xargs pip uninstall -y
+  ```
+
 ### `[ WARN:0 ] global cap_v4l.cpp ... can't open camera by index`
 - User không thuộc group `video` → `sudo usermod -aG video $USER` + logout/login
 - Camera bị app khác giữ → `sudo fuser -k /dev/video0`
@@ -740,7 +845,8 @@ Orange Pi 5 (RK3588, 8GB RAM)
 │   │   ├── state_machine.py      ← FSM phát hiện ngạt thở
 │   │   └── occlusion_detector.py ← Multi-signal voting (hist+skin+edge+lap_var)
 │   ├── scripts/
-│   │   ├── fix_env.sh            ← Uninstall opencv variants + cài đúng version
+│   │   ├── install_opi.sh        ← One-shot install cho Orange Pi (KHUYẾN NGHỊ)
+│   │   ├── fix_env.sh            ← Uninstall opencv/nvidia variants + cài đúng version
 │   │   ├── test_webcam.py        ← Verify camera + FPS
 │   │   └── benchmark.py          ← Đo pipeline
 │   ├── tests/

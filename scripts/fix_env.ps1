@@ -35,8 +35,18 @@ foreach ($pkg in @("opencv-python", "opencv-contrib-python", "opencv-python-head
 }
 
 Write-Host ""
-Write-Host "=== Buoc 2: Cai numpy<2 + opencv-python<4.11 ==="
-python -m pip install "numpy<2" "opencv-python<4.11" --force-reinstall
+Write-Host "=== Buoc 2: Uninstall nvidia-* / cuda-* (project CPU-only) ==="
+$nvidiaPkgs = (python -m pip list 2>$null | Select-String -Pattern "^(nvidia-|cuda-toolkit)" | ForEach-Object { ($_ -split '\s+')[0] })
+if ($nvidiaPkgs) {
+    Write-Host "Se xoa: $nvidiaPkgs"
+    foreach ($pkg in $nvidiaPkgs) { python -m pip uninstall -y $pkg 2>$null }
+} else {
+    Write-Host "(khong co - tot)"
+}
+
+Write-Host ""
+Write-Host "=== Buoc 3: Cai numpy<2 + opencv-python<4.11 ==="
+python -m pip install "numpy<2" "opencv-python<4.11" --force-reinstall --no-cache-dir
 
 Write-Host ""
 Write-Host "=== Sau khi fix ==="

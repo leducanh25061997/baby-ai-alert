@@ -1,17 +1,18 @@
 """Benchmark pipeline — đo FPS thực tế của từng stage để biết bottleneck.
 
+CPU-only: project không hỗ trợ NVIDIA GPU, RK3588 không có CUDA.
+
 Đo riêng:
   1. Camera read (raw)
   2. MediaPipe FaceMesh
   3. Histogram extraction + correlation
-  4. YOLO inference (CPU vs CUDA nếu có)
+  4. YOLO inference (CPU)
   5. Tổng end-to-end
 
 Sử dụng:
   python scripts/benchmark.py                       # webcam mặc định
   python scripts/benchmark.py --source 0 --frames 200
   python scripts/benchmark.py --no-yolo             # chỉ đo face_mesh + histogram
-  python scripts/benchmark.py --yolo-device cpu     # bắt YOLO chạy CPU dù có CUDA
   python scripts/benchmark.py --synthetic           # dùng frame giả nếu không có camera
 """
 import argparse
@@ -69,24 +70,11 @@ def main():
     ap.add_argument("--frames",      type=int, default=150, help="Số frame benchmark")
     ap.add_argument("--warmup",      type=int, default=10)
     ap.add_argument("--no-yolo",     action="store_true")
-    ap.add_argument("--yolo-device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--synthetic",   action="store_true",
                     help="dùng frame giả thay vì camera (debug pipeline)")
     args = ap.parse_args()
 
-    # ----- Detect device -----
-    device_info = "cpu (torch không có)"
-    cuda_available = False
-    try:
-        import torch
-        if torch.cuda.is_available():
-            cuda_available = True
-            device_info = f"cuda → {torch.cuda.get_device_name(0)}"
-        else:
-            device_info = "cpu (torch.cuda không sẵn)"
-    except ImportError:
-        pass
-    print(f"Device: {device_info}")
+    print("Device: cpu (project CPU-only, không hỗ trợ NVIDIA GPU)")
     print(f"OpenCV: {cv2.__version__}")
     print()
 
@@ -113,7 +101,7 @@ def main():
         min_detection_confidence=0.5, min_tracking_confidence=0.5,
     )
 
-    # ----- Load YOLO (optional) -----
+    # ----- Load YOLO (CPU-only) -----
     yolo = None
     yolo_device = "cpu"
     if not args.no_yolo:
@@ -123,10 +111,6 @@ def main():
         else:
             try:
                 from ultralytics import YOLO
-                yolo_device = (
-                    "cuda:0" if (args.yolo_device in ("auto", "cuda") and cuda_available)
-                    else "cpu"
-                )
                 yolo = YOLO(str(model_path))
                 yolo.to(yolo_device)
                 print(f"YOLO: {model_path.name} on {yolo_device}")
@@ -239,10 +223,8 @@ def main():
             print(f"⚠️  Pipeline {avg_total:.1f}ms > ngân sách {target_ms:.1f}ms → "
                   f"thực tế chỉ đạt ~{achievable:.0f} FPS")
             print("   Khuyến nghị: giảm camera FPS xuống bằng giá trị này, hoặc:")
-            if yolo is not None and yolo_device == "cpu" and cuda_available:
-                print("   - YOLO đang chạy CPU dù có CUDA → bỏ --yolo-device cpu")
-            elif yolo is not None and times_yolo and statistics.mean(times_yolo) > 30:
-                print("   - YOLO chiếm > 30ms → tăng YOLO_RUN_EVERY_N_FRAMES, hoặc convert TensorRT")
+            if yolo is not None and times_yolo and statistics.mean(times_yolo) > 30:
+                print("   - YOLO chiếm > 30ms → tăng YOLO_EVERY, hoặc convert sang RKNN (NPU)")
             elif times_face and statistics.mean(times_face) > 25:
                 print("   - MediaPipe chậm → giảm resolution xuống 960x540 hoặc 640x480")
     return 0
