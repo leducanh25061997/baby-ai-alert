@@ -147,22 +147,55 @@ def test_face_gone_long_no_yolo_resets():
     print("✅ test_face_gone_long_no_yolo_resets")
 
 
-def test_yolo_no_person_resets_immediately():
-    """YOLO khẳng định không có người → trẻ rời khung → reset ngay, KHÔNG alert."""
+def test_yolo_no_person_in_grace_still_alerts():
+    """SAFETY-FIRST: YOLO=False trong grace KHÔNG được reset.
+
+    Lý do thực tế trên Orange Pi: camera nhìn TOP-DOWN xuống mặt trẻ nằm,
+    YOLO COCO 'person' class chủ yếu train trên người đứng/ngồi → top-down
+    view của trẻ → YOLO HAY trả False sai. Khi giấy/chăn che kín mặt:
+    MediaPipe mất tracking + YOLO trả False sai → nếu reset ngay sẽ MISS
+    alert hoàn toàn (kịch bản nguy hiểm chết người).
+
+    Vì vậy trong grace + đã nghi che → tin face_lost path, kệ YOLO.
+    """
     fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5)
     fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
-    # Mất mặt VÀ YOLO không thấy người → reset ngay
+    # Mất mặt + YOLO=False trong grace → VẪN ALERT (safety-first)
     r = fsm.step(now=0.5, face_present=False, occluded_by_histogram=False,
+                 person_in_frame=False)
+    assert r.state == STATE_ALERT, "Trong grace phải đếm bất kể YOLO"
+    assert r.trigger == TRIGGER_FACE_LOST
+    # Sau grace, occlusion_start đã set → tiếp tục đếm dù YOLO=False
+    r = fsm.step(now=10.0, face_present=False, occluded_by_histogram=False,
+                 person_in_frame=False)
+    assert r.state == STATE_ALERT
+    assert not r.should_alert  # chưa đủ 15s
+    # t=15.0 → đủ ngưỡng → BẮN bất kể YOLO=False
+    r = fsm.step(now=15.0, face_present=False, occluded_by_histogram=False,
+                 person_in_frame=False)
+    assert r.should_alert, "Phải bắn alert dù YOLO=False — kịch bản giấy che mặt"
+    assert r.trigger == TRIGGER_FACE_LOST
+    print("✅ test_yolo_no_person_in_grace_still_alerts")
+
+
+def test_yolo_no_person_no_prior_face_resets():
+    """YOLO=False khi CHƯA TỪNG thấy mặt → trẻ chưa từng vào khung → reset.
+
+    Đây là case 'cha mẹ chưa đặt trẻ vào nôi' — không nên alert.
+    """
+    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5)
+    # Chưa từng thấy mặt + YOLO=False → reset
+    r = fsm.step(now=0.0, face_present=False, occluded_by_histogram=False,
                  person_in_frame=False)
     assert r.state == STATE_NO_FACE
     assert not r.should_alert
     assert fsm.occlusion_start is None
-    # Tiếp tục không có ai → vẫn NO_FACE, không alert
-    r = fsm.step(now=20.0, face_present=False, occluded_by_histogram=False,
+    # Suốt 30s không ai → vẫn NO_FACE
+    r = fsm.step(now=30.0, face_present=False, occluded_by_histogram=False,
                  person_in_frame=False)
     assert r.state == STATE_NO_FACE
     assert not r.should_alert
-    print("✅ test_yolo_no_person_resets_immediately")
+    print("✅ test_yolo_no_person_no_prior_face_resets")
 
 
 def test_yolo_person_present_keeps_counting_beyond_grace():
@@ -250,7 +283,8 @@ if __name__ == "__main__":
         test_face_lost_critical_bug_fix,
         test_face_lost_briefly_then_returns_no_alert,
         test_face_gone_long_no_yolo_resets,
-        test_yolo_no_person_resets_immediately,
+        test_yolo_no_person_in_grace_still_alerts,
+        test_yolo_no_person_no_prior_face_resets,
         test_yolo_person_present_keeps_counting_beyond_grace,
         test_alert_sent_flag_prevents_spam,
         test_no_face_then_alert_then_recovery,

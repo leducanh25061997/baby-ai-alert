@@ -107,6 +107,11 @@ CONFIRM_FRAMES          = int(os.environ.get("CONFIRM_FRAMES",          "10"))
 SMOOTHER_MAX_MISS       = int(os.environ.get("SMOOTHER_MAX_MISS",       "3"))
 MIN_QUALITY_WARN        = float(os.environ.get("MIN_QUALITY_WARN",      "0.5"))
 
+# Tần suất in heartbeat log tiếng Việt khi chạy headless (Orange Pi không màn hình).
+# Mỗi N giây in lại trạng thái hiện tại để vận hành biết hệ thống vẫn sống và
+# đang ở trạng thái nào. State chuyển → luôn in ngay không phụ thuộc giá trị này.
+LOG_INTERVAL_SEC        = float(os.environ.get("LOG_INTERVAL_SEC",      "5"))
+
 FACE_LOST_GRACE_SEC     = 1.5
 FACE_GONE_RESET_SEC     = OCCLUSION_THRESHOLD_SEC + 10
 
@@ -271,6 +276,11 @@ class BabyMonitorV5:
         self._recal_request  = threading.Event()
         # Theo dõi để auto-recalibrate khi safe lâu.
         self._safe_streak_start = None
+        # State của lần log gần nhất + thời điểm heartbeat gần nhất.
+        # Dùng để in chuyển trạng thái ngay + heartbeat định kỳ tiếng Việt
+        # khi chạy headless trên Orange Pi (không có màn hình debug).
+        self._last_logged_state = None
+        self._last_heartbeat_t  = 0.0
 
         self._shutdown = threading.Event()
         try:
@@ -380,6 +390,67 @@ class BabyMonitorV5:
                 self.send_alert(snap, elapsed, result, trigger)
             ), daemon=True
         ).start()
+
+    def _log_status(self, now, state, elapsed, trigger, check_result,
+                    person_seen, calib_remaining, face_present):
+        """In log tiếng Việt cho trạng thái hiện tại.
+
+        - State chuyển → in ngay (transition log).
+        - State không chuyển → in heartbeat mỗi LOG_INTERVAL_SEC giây.
+        Mục đích: vận hành trên Orange Pi headless biết hệ thống đang
+        bị che / không bị che / mất mặt mà không cần GUI.
+        """
+        state_changed = state != self._last_logged_state
+        time_for_heartbeat = (now - self._last_heartbeat_t) >= LOG_INTERVAL_SEC
+        if not state_changed and not time_for_heartbeat:
+            return
+
+        ts = datetime.now().strftime("%H:%M:%S")
+        prefix = "🔁" if state_changed else "  "
+
+        if state == STATE_CALIBRATING:
+            line = (f"{prefix} [{ts}] 🟡 ĐANG HIỆU CHỈNH baseline — "
+                    f"giữ nguyên mặt trẻ, còn {calib_remaining:.1f}s")
+
+        elif state == STATE_NO_FACE:
+            yolo_note = ""
+            if person_seen is True:
+                yolo_note = " | YOLO: vẫn thấy người trong khung"
+            elif person_seen is False:
+                yolo_note = " | YOLO: không có người (trẻ rời khung)"
+            line = f"{prefix} [{ts}] ⚪ KHÔNG THẤY MẶT TRẺ{yolo_note}"
+
+        elif state == STATE_SAFE:
+            extra = ""
+            if check_result is not None:
+                nv = check_result.nose_votes_for_occluded
+                mv = check_result.mouth_votes_for_occluded
+                if nv >= 1 or mv >= 1:
+                    extra = (f" | ⚠ dấu hiệu nhẹ: mũi {nv}/4, miệng {mv}/4 "
+                             f"(chưa đủ để cảnh báo)")
+            line = (f"{prefix} [{ts}] 🟢 BÌNH THƯỜNG — Mũi/miệng nhìn rõ, "
+                    f"KHÔNG bị che{extra}")
+
+        elif state == STATE_ALERT:
+            rem = max(0.0, OCCLUSION_THRESHOLD_SEC - elapsed)
+            if trigger == TRIGGER_FACE_LOST:
+                line = (f"{prefix} [{ts}] 🔴 NGUY CƠ NGẠT THỞ — MẤT MẶT, "
+                        f"NGHI BỊ PHỦ KÍN | đã {elapsed:.1f}s, còn "
+                        f"{rem:.1f}s nữa sẽ gửi cảnh báo Telegram")
+            else:
+                votes_txt = ""
+                if check_result is not None:
+                    votes_txt = (f" | mũi {check_result.nose_votes_for_occluded}/4, "
+                                 f"miệng {check_result.mouth_votes_for_occluded}/4")
+                line = (f"{prefix} [{ts}] 🔴 ĐANG BỊ CHE MŨI/MIỆNG — "
+                        f"đã {elapsed:.1f}s{votes_txt}, còn {rem:.1f}s nữa "
+                        f"sẽ gửi cảnh báo Telegram")
+        else:
+            line = f"{prefix} [{ts}] (state lạ: {state})"
+
+        print(line)
+        self._last_logged_state = state
+        self._last_heartbeat_t  = now
 
     def _request_recalibrate(self, reason: str):
         print(f"🔄 Yêu cầu recalibrate: {reason}")
@@ -520,6 +591,8 @@ class BabyMonitorV5:
               if AUTO_RECAL_AFTER_SEC > 0 else "   Auto-recal       : tắt")
         print(f"   Events lưu tại   : {EVENTS_DIR}")
         print(f"   Headless         : {HEADLESS}")
+        print(f"   Log heartbeat    : mỗi {LOG_INTERVAL_SEC:.1f}s "
+              f"(set LOG_INTERVAL_SEC để đổi)")
         print(f"   Recal manual     : nhấn R (GUI) hoặc `kill -USR1 <pid>` (headless)")
         print("\n⏳ Đang load MediaPipe (lần đầu có thể mất 5-10s)...")
 
@@ -623,8 +696,29 @@ class BabyMonitorV5:
                                     occluded_by_detector = self.smoother.update(
                                         check_result.occluded
                                     )
+                                    # === Quick-confirm tín hiệu cực mạnh ===
+                                    # Kịch bản che mũi+miệng đồng thời (tay/
+                                    # khẩu trang/giấy nhỏ — mắt vẫn hở):
+                                    # MediaPipe vẫn thấy mặt nhưng confidence
+                                    # dao động → smoother 10-frame có thể
+                                    # không kịp confirm trước khi mặt flicker
+                                    # mất. Bypass khi cả 2 patch đều vote
+                                    # rất rõ (≥3/4): 8/8 tín hiệu nói có che
+                                    # → không cần 10-frame consensus, set
+                                    # state ngay.
+                                    if (check_result.nose_votes_for_occluded >= 3
+                                            and check_result.mouth_votes_for_occluded >= 3):
+                                        occluded_by_detector = True
+                                        self.smoother.state = True
                         else:
-                            self.smoother.reset()
+                            # KHÔNG reset smoother khi face mất ngắn.
+                            # Lý do: khi bị che mũi+miệng, MediaPipe có thể
+                            # flicker thấy/mất → reset hard sẽ never confirm
+                            # vì mỗi lần face quay lại phải đếm 10 frame từ
+                            # đầu. Giữ state cũ → vote tích lũy được giữ lại.
+                            # Khi face mất hoàn toàn → FSM face_lost path
+                            # sẽ tự alert sau 15s, không phụ thuộc smoother.
+                            pass
 
                         result_fsm = self.fsm.step(
                             now=now,
@@ -655,6 +749,15 @@ class BabyMonitorV5:
 
                     # Cập nhật prev alert cho frame sau
                     self._prev_in_alert = (state == STATE_ALERT)
+
+                    # === Log tiếng Việt cho headless (Orange Pi) ===
+                    self._log_status(
+                        now=now, state=state, elapsed=elapsed,
+                        trigger=trigger, check_result=check_result,
+                        person_seen=person_seen,
+                        calib_remaining=calib_remaining,
+                        face_present=face_present,
+                    )
 
                     # === UI + hotkey 'R' ===
                     if not HEADLESS:

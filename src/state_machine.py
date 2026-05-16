@@ -97,19 +97,24 @@ class OcclusionStateMachine:
 
         # === Nhánh 2: KHÔNG thấy mặt ===
         # Lưu ý đây chính là kịch bản nguy hiểm nhất (bị phủ kín).
-
-        # YOLO khẳng định không có người → trẻ rời khung thật, reset.
-        # Đây là override quan trọng để tránh false alert.
-        if person_in_frame is False:
-            self._reset()
-            return StepResult(STATE_NO_FACE, 0.0, False, "")
+        #
+        # SAFETY-FIRST ORDERING: kiểm tra grace + occlusion_start TRƯỚC khi cho
+        # YOLO=False override reset. Lý do thực tế trên Orange Pi:
+        #   - Camera đặt nhìn TOP-DOWN xuống mặt trẻ nằm ngửa.
+        #   - YOLO COCO 'person' class chủ yếu train trên người đứng/ngồi →
+        #     top-down view trẻ → YOLO HAY trả False (miss detect, không
+        #     phải vì trẻ rời khung).
+        #   - Khi giấy/chăn che kín mặt: MediaPipe mất face_present + YOLO
+        #     trả False sai → nếu reset ngay sẽ MISS alert hoàn toàn.
+        # Vì vậy: trong grace + đã nghi che → tin face_lost path, kệ YOLO.
 
         time_since = (
             now - self.last_face_seen
             if self.last_face_seen is not None else float("inf")
         )
 
-        # 2a. Mặt vừa biến mất (trong grace) → khởi động đếm.
+        # 2a. Mặt vừa biến mất (trong grace) → khởi động đếm BẤT KỂ YOLO.
+        # Grace quá ngắn (1.5s) để tin một frame YOLO=False.
         if time_since <= self.grace_sec:
             if self.occlusion_start is None:
                 self.occlusion_start = now - time_since
@@ -118,7 +123,9 @@ class OcclusionStateMachine:
             return StepResult(STATE_ALERT, elapsed, should,
                               self.trigger_reason or TRIGGER_FACE_LOST)
 
-        # 2b. Đã đếm rồi và chưa quá ngưỡng reset → tiếp tục đếm.
+        # 2b. Đã nghi rồi (occlusion_start set) + chưa quá gone_reset_sec →
+        # tiếp tục đếm BẤT KỂ YOLO. Một khi đã vào trạng thái nghi, không
+        # cho YOLO=False thắng — phải đợi face quay lại hoặc đủ ngưỡng alert.
         if time_since <= self.gone_reset_sec and self.occlusion_start is not None:
             elapsed, should = self._maybe_alert(now)
             return StepResult(STATE_ALERT, elapsed, should,
@@ -134,6 +141,12 @@ class OcclusionStateMachine:
             return StepResult(STATE_ALERT, elapsed, should,
                               self.trigger_reason or TRIGGER_FACE_LOST)
 
-        # 2d. Mất mặt quá lâu, không có YOLO khẳng định → coi như rời khung.
+        # 2d. YOLO khẳng định KHÔNG có người, đã ngoài grace + chưa từng nghi
+        # che → trẻ rời khung thật, reset.
+        if person_in_frame is False:
+            self._reset()
+            return StepResult(STATE_NO_FACE, 0.0, False, "")
+
+        # 2e. Mất mặt quá lâu, không có YOLO khẳng định → coi như rời khung.
         self._reset()
         return StepResult(STATE_NO_FACE, 0.0, False, "")
