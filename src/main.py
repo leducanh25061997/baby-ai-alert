@@ -100,7 +100,11 @@ TELEGRAM_TOKEN = os.environ.get(
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7316578932")
 
 OCCLUSION_THRESHOLD_SEC = int(os.environ.get("OCCLUSION_THRESHOLD_SEC", "15"))
-COOLDOWN_SEC            = int(os.environ.get("COOLDOWN_SEC",            "60"))
+# Spam control trong send_alert chỉ là defense-in-depth chống race condition
+# (state_machine đã quản lý timing chính: re-alert mỗi OCCLUSION_THRESHOLD_SEC).
+# Đặt mặc định 5s — đủ chặn double-fire frame-level mà không chặn re-alert
+# chính đáng mỗi 15s khi vẫn còn bị che.
+COOLDOWN_SEC            = int(os.environ.get("COOLDOWN_SEC",            "5"))
 
 CALIBRATION_SEC         = int(os.environ.get("CALIBRATION_SEC",         "5"))
 CONFIRM_FRAMES          = int(os.environ.get("CONFIRM_FRAMES",          "10"))
@@ -432,19 +436,34 @@ class BabyMonitorV5:
                     f"KHÔNG bị che{extra}")
 
         elif state == STATE_ALERT:
-            rem = max(0.0, OCCLUSION_THRESHOLD_SEC - elapsed)
+            # Tính countdown đúng với reality của state_machine:
+            #   - Chưa đủ ngưỡng (elapsed < threshold) → countdown tới alert đầu
+            #   - Đã alert lần đầu → countdown tới lần re-alert tiếp theo
+            #     (mỗi threshold_sec lặp 1 lần khi còn bị che)
+            last_alert_at = self.fsm.last_alert_at
+            if last_alert_at is None:
+                rem = max(0.0, OCCLUSION_THRESHOLD_SEC - elapsed)
+                countdown_txt = f"còn {rem:.1f}s nữa sẽ gửi cảnh báo Telegram"
+            else:
+                next_rem = max(
+                    0.0,
+                    OCCLUSION_THRESHOLD_SEC - (now - last_alert_at),
+                )
+                countdown_txt = (
+                    f"đã gửi cảnh báo, gửi lại sau {next_rem:.1f}s "
+                    f"nếu vẫn còn bị che"
+                )
             if trigger == TRIGGER_FACE_LOST:
                 line = (f"{prefix} [{ts}] 🔴 NGUY CƠ NGẠT THỞ — MẤT MẶT, "
-                        f"NGHI BỊ PHỦ KÍN | đã {elapsed:.1f}s, còn "
-                        f"{rem:.1f}s nữa sẽ gửi cảnh báo Telegram")
+                        f"NGHI BỊ PHỦ KÍN | đã {elapsed:.1f}s, "
+                        f"{countdown_txt}")
             else:
                 votes_txt = ""
                 if check_result is not None:
                     votes_txt = (f" | mũi {check_result.nose_votes_for_occluded}/4, "
                                  f"miệng {check_result.mouth_votes_for_occluded}/4")
                 line = (f"{prefix} [{ts}] 🔴 ĐANG BỊ CHE MŨI/MIỆNG — "
-                        f"đã {elapsed:.1f}s{votes_txt}, còn {rem:.1f}s nữa "
-                        f"sẽ gửi cảnh báo Telegram")
+                        f"đã {elapsed:.1f}s{votes_txt}, {countdown_txt}")
         else:
             line = f"{prefix} [{ts}] (state lạ: {state})"
 
@@ -529,11 +548,20 @@ class BabyMonitorV5:
             msg   = "Khong phat hien khuon mat"
             color = (100, 100, 100)
         elif state == STATE_ALERT:
-            rem = max(0, OCCLUSION_THRESHOLD_SEC - elapsed)
-            if trigger == TRIGGER_FACE_LOST:
-                msg = f"MAT MAT - NGHI BI PHU KIN {elapsed:.1f}s | Con lai: {rem:.1f}s"
+            last_alert_at = self.fsm.last_alert_at
+            if last_alert_at is None:
+                rem = max(0, OCCLUSION_THRESHOLD_SEC - elapsed)
+                tail = f"Con lai: {rem:.1f}s"
             else:
-                msg = f"MUI/MIENG BI CHE {elapsed:.1f}s | Con lai: {rem:.1f}s"
+                next_rem = max(
+                    0.0,
+                    OCCLUSION_THRESHOLD_SEC - (time.monotonic() - last_alert_at),
+                )
+                tail = f"Da gui | Gui lai sau: {next_rem:.1f}s"
+            if trigger == TRIGGER_FACE_LOST:
+                msg = f"MAT MAT - NGHI BI PHU KIN {elapsed:.1f}s | {tail}"
+            else:
+                msg = f"MUI/MIENG BI CHE {elapsed:.1f}s | {tail}"
             color = (0, 80, 255)
             cv2.putText(frame, ">>> NGUY CO NGAT THO <<<",
                         (10, h-10),

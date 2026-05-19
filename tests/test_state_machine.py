@@ -55,18 +55,22 @@ def test_histogram_alert_fires_at_threshold():
 
 
 def test_histogram_recovery_resets():
-    """Bị che rồi hết bị che → reset, lần sau lại đếm từ đầu."""
-    fsm = OcclusionStateMachine(threshold_sec=15)
+    """Bị che rồi hết bị che → reset SAU khi safe đủ lâu (anti-flicker)."""
+    fsm = OcclusionStateMachine(threshold_sec=15, safe_recovery_sec=1.5)
     fsm.step(now=0.0, face_present=True, occluded_by_histogram=True)
     fsm.step(now=10.0, face_present=True, occluded_by_histogram=True)
-    # Recovery
+    # ANTI-FLICKER: 1 frame safe (0.5s) chưa đủ → vẫn ALERT, occlusion giữ
     r = fsm.step(now=10.5, face_present=True, occluded_by_histogram=False)
+    assert r.state == STATE_ALERT, "Anti-flicker: 0.5s safe chưa đủ để reset"
+    assert fsm.occlusion_start is not None
+    # Safe đủ lâu (1.5s safe streak) → reset
+    r = fsm.step(now=12.0, face_present=True, occluded_by_histogram=False)
     assert r.state == STATE_SAFE
     assert fsm.occlusion_start is None
     # Bị che lại từ đầu
-    r = fsm.step(now=11.0, face_present=True, occluded_by_histogram=True)
+    r = fsm.step(now=12.5, face_present=True, occluded_by_histogram=True)
     assert r.state == STATE_ALERT
-    assert r.elapsed < 1.0  # đếm từ 11.0, không phải 0.0
+    assert r.elapsed < 1.0  # đếm từ 12.5
     print("✅ test_histogram_recovery_resets")
 
 
@@ -101,12 +105,18 @@ def test_face_lost_critical_bug_fix():
 
 
 def test_face_lost_briefly_then_returns_no_alert():
-    """Mặt mất 0.5s rồi quay lại bình thường → không được bắn alert."""
-    fsm = OcclusionStateMachine(threshold_sec=15)
+    """Mặt mất 0.5s rồi quay lại bình thường — không bắn alert (chưa đủ 15s)
+    và sau khi safe đủ lâu thì reset về SAFE."""
+    fsm = OcclusionStateMachine(threshold_sec=15, safe_recovery_sec=1.5)
     fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
     fsm.step(now=0.5, face_present=False, occluded_by_histogram=False)
-    # Quay lại bình thường
+    # Quay lại bình thường — anti-flicker chưa đủ 1.5s safe → giữ ALERT
     r = fsm.step(now=1.0, face_present=True, occluded_by_histogram=False)
+    assert r.state == STATE_ALERT
+    assert fsm.occlusion_start is not None
+    assert not r.should_alert  # chưa đủ 15s
+    # Safe đủ lâu (1.5s liên tục sau t=1.0) → reset về SAFE
+    r = fsm.step(now=2.6, face_present=True, occluded_by_histogram=False)
     assert r.state == STATE_SAFE
     assert fsm.occlusion_start is None
     assert not r.should_alert
@@ -218,26 +228,54 @@ def test_yolo_person_present_keeps_counting_beyond_grace():
     print("✅ test_yolo_person_present_keeps_counting_beyond_grace")
 
 
-def test_alert_sent_flag_prevents_spam():
-    """Khi đã bắn alert 1 lần, không được bắn lại liên tục mỗi frame."""
+def test_alert_repeats_every_threshold_while_still_occluded():
+    """Khi vẫn còn bị che, alert lặp lại đúng mỗi threshold_sec, KHÔNG spam
+    mỗi frame. An toàn cho ngạt thở: cảnh báo liên tục đến khi tình huống
+    được giải quyết (parent gỡ vật che mặt trẻ)."""
+    fsm = OcclusionStateMachine(threshold_sec=15)
+    fsm.step(now=0.0, face_present=True, occluded_by_histogram=True)
+    # Mỗi 0.1s gọi step → mô phỏng 30fps
+    fired_times = []
+    t = 0.0
+    while t < 75.0:
+        r = fsm.step(now=t, face_present=True, occluded_by_histogram=True)
+        if r.should_alert:
+            fired_times.append(t)
+        t += 0.1
+    # Kỳ vọng: fire tại ~15s, ~30s, ~45s, ~60s (4 lần trong 75s)
+    assert len(fired_times) == 4, (
+        f"Phải fire 4 lần (mỗi 15s); thực tế {len(fired_times)} tại {fired_times}"
+    )
+    # Khoảng giữa 2 lần fire phải xấp xỉ 15s
+    for i in range(1, len(fired_times)):
+        gap = fired_times[i] - fired_times[i-1]
+        assert 14.9 < gap < 15.2, f"Gap {gap:.2f}s không đúng 15s"
+    print("✅ test_alert_repeats_every_threshold_while_still_occluded")
+
+
+def test_alert_no_spam_within_one_threshold_window():
+    """Trong 1 chu kỳ 15s, dù gọi step() mỗi frame, chỉ fire 1 lần."""
     fsm = OcclusionStateMachine(threshold_sec=15)
     fsm.step(now=0.0, face_present=True, occluded_by_histogram=True)
     # Bắn 1 lần ở t=15
     r = fsm.step(now=15.0, face_present=True, occluded_by_histogram=True)
     assert r.should_alert
-    # Suốt 60s sau, không bắn lại
-    fired_count = 0
-    for t in range(16, 75):
-        r = fsm.step(now=float(t), face_present=True, occluded_by_histogram=True)
+    # Từ 15.1 đến 29.9 — không bắn lại (chưa đủ chu kỳ 15s tiếp theo)
+    fired = 0
+    t = 15.1
+    while t < 29.95:
+        r = fsm.step(now=t, face_present=True, occluded_by_histogram=True)
         if r.should_alert:
-            fired_count += 1
-    assert fired_count == 0, f"Bắn lại {fired_count} lần — sai!"
-    print("✅ test_alert_sent_flag_prevents_spam")
+            fired += 1
+        t += 0.1
+    assert fired == 0, f"Bắn lại {fired} lần trong cùng chu kỳ — sai!"
+    print("✅ test_alert_no_spam_within_one_threshold_window")
 
 
 def test_no_face_then_alert_then_recovery():
     """Full flow: NO_FACE → SAFE → ALERT (face_lost) → SAFE again."""
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5)
+    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5,
+                                 safe_recovery_sec=1.5)
 
     # Chưa từng thấy mặt
     r = fsm.step(now=0.0, face_present=False, occluded_by_histogram=False)
@@ -251,8 +289,13 @@ def test_no_face_then_alert_then_recovery():
     r = fsm.step(now=1.5, face_present=False, occluded_by_histogram=False)
     assert r.state == STATE_ALERT
 
-    # Mặt quay lại sạch
+    # Mặt quay lại sạch — anti-flicker: 0.5s chưa đủ
     r = fsm.step(now=2.0, face_present=True, occluded_by_histogram=False)
+    assert r.state == STATE_ALERT
+    assert not r.should_alert
+
+    # Safe đủ lâu (1.5s) → reset về SAFE
+    r = fsm.step(now=3.5, face_present=True, occluded_by_histogram=False)
     assert r.state == STATE_SAFE
     assert not r.should_alert
     print("✅ test_no_face_then_alert_then_recovery")
@@ -286,7 +329,8 @@ if __name__ == "__main__":
         test_yolo_no_person_in_grace_still_alerts,
         test_yolo_no_person_no_prior_face_resets,
         test_yolo_person_present_keeps_counting_beyond_grace,
-        test_alert_sent_flag_prevents_spam,
+        test_alert_repeats_every_threshold_while_still_occluded,
+        test_alert_no_spam_within_one_threshold_window,
         test_no_face_then_alert_then_recovery,
         test_grace_period_starts_count_from_face_lost_moment,
     ]

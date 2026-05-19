@@ -45,30 +45,63 @@ class OcclusionStateMachine:
         threshold_sec: float = 15.0,
         grace_sec: float = 1.5,
         gone_reset_sec: float = 25.0,
+        repeat_alert_sec: Optional[float] = None,
+        safe_recovery_sec: float = 1.5,
     ):
         self.threshold_sec   = threshold_sec
         self.grace_sec       = grace_sec
         self.gone_reset_sec  = gone_reset_sec
+        # Bao lâu re-alert khi vẫn còn bị che. Mặc định = threshold_sec
+        # (15s che → alert; tiếp tục che thêm 15s → alert lại; ...).
+        self.repeat_alert_sec  = (
+            repeat_alert_sec if repeat_alert_sec is not None else threshold_sec
+        )
+        # Anti-flicker: khi đang trong ALERT, cần thấy mặt sạch liên tục
+        # ≥ safe_recovery_sec mới reset occlusion_start. Tránh MediaPipe
+        # flicker thấy/mất mặt làm counter bị reset oan.
+        self.safe_recovery_sec = safe_recovery_sec
 
         self.last_face_seen: Optional[float] = None
         self.occlusion_start: Optional[float] = None
-        self.alert_sent      = False
+        # Thời điểm alert gần nhất đã gửi (None = chưa gửi lần nào trong
+        # occlusion event hiện tại). Dùng cho repeat-alert mỗi 15s.
+        self.last_alert_at: Optional[float] = None
+        # Thời điểm bắt đầu safe streak khi đang trong occlusion event
+        # (None = chưa thấy frame safe nào sau khi nghi). Dùng anti-flicker.
+        self.safe_since: Optional[float] = None
         self.trigger_reason  = ""
 
     # --- helpers ---
     def _reset(self) -> None:
         self.occlusion_start = None
-        self.alert_sent      = False
+        self.last_alert_at   = None
+        self.safe_since      = None
         self.trigger_reason  = ""
 
     def _maybe_alert(self, now: float) -> tuple[float, bool]:
+        """Trả về (elapsed, should_alert).
+
+        Bắn alert lần đầu khi elapsed ≥ threshold_sec.
+        Sau đó, mỗi repeat_alert_sec bắn lại 1 lần nếu vẫn còn trong occlusion.
+        """
         if self.occlusion_start is None:
             return 0.0, False
         elapsed = now - self.occlusion_start
-        if elapsed >= self.threshold_sec and not self.alert_sent:
-            self.alert_sent = True
+        if elapsed < self.threshold_sec:
+            return elapsed, False
+        # Đủ ngưỡng → alert lần đầu hoặc lần lặp
+        if self.last_alert_at is None:
+            self.last_alert_at = now
+            return elapsed, True
+        if now - self.last_alert_at >= self.repeat_alert_sec:
+            self.last_alert_at = now
             return elapsed, True
         return elapsed, False
+
+    @property
+    def alert_sent(self) -> bool:
+        """Backward-compat: True nếu đã bắn ít nhất 1 alert trong event này."""
+        return self.last_alert_at is not None
 
     # --- main entrypoint ---
     def step(
@@ -84,6 +117,8 @@ class OcclusionStateMachine:
             self.last_face_seen = now
 
             if occluded_by_histogram:
+                # Đang bị che → clear safe streak (nếu có)
+                self.safe_since = None
                 if self.occlusion_start is None:
                     self.occlusion_start = now
                     self.trigger_reason  = TRIGGER_HISTOGRAM
@@ -91,11 +126,29 @@ class OcclusionStateMachine:
                 return StepResult(STATE_ALERT, elapsed, should,
                                   self.trigger_reason or TRIGGER_HISTOGRAM)
 
-            # Mặt OK, không bị che → reset alert state, tiếp tục giám sát
-            self._reset()
-            return StepResult(STATE_SAFE, 0.0, False, "")
+            # face_present + not occluded
+            # Nếu chưa từng nghi (occlusion_start is None) → SAFE bình thường.
+            if self.occlusion_start is None:
+                self.safe_since = None
+                return StepResult(STATE_SAFE, 0.0, False, "")
+
+            # Đang trong occlusion event → ANTI-FLICKER: cần thấy mặt sạch
+            # liên tục ≥ safe_recovery_sec mới reset. Tránh MediaPipe flicker
+            # 1 frame "thấy mặt sạch" làm counter bị xóa oan.
+            if self.safe_since is None:
+                self.safe_since = now
+            if now - self.safe_since >= self.safe_recovery_sec:
+                self._reset()
+                return StepResult(STATE_SAFE, 0.0, False, "")
+            # Chưa đủ safe → giữ ALERT, tiếp tục đếm + có thể re-alert
+            elapsed, should = self._maybe_alert(now)
+            return StepResult(STATE_ALERT, elapsed, should,
+                              self.trigger_reason or TRIGGER_HISTOGRAM)
 
         # === Nhánh 2: KHÔNG thấy mặt ===
+        # Không thấy mặt thì không thể tính "safe streak"
+        self.safe_since = None
+
         # Lưu ý đây chính là kịch bản nguy hiểm nhất (bị phủ kín).
         #
         # SAFETY-FIRST ORDERING: kiểm tra grace + occlusion_start TRƯỚC khi cho
