@@ -265,7 +265,6 @@ class PersonDetector:
 
 class BabyMonitorV5:
     def __init__(self):
-        self.bot             = Bot(token=TELEGRAM_TOKEN)
         self.detector        = OcclusionDetector()
         self.smoother        = SmoothingBuffer()
         self.person_detector = PersonDetector(YOLO_MODEL_PATH)
@@ -375,11 +374,20 @@ class BabyMonitorV5:
             f"👉 *Kiểm tra trẻ ngay lập tức!*"
         )
 
+        # Bot MỚI cho mỗi lần gửi: _dispatch_alert chạy mỗi alert trong 1
+        # thread + event loop riêng (asyncio.run). python-telegram-bot v20+
+        # bind httpx client nội bộ vào event loop ĐẦU TIÊN nó được dùng — tái
+        # dùng 1 Bot chung ở loop sau (loop cũ đã đóng) sẽ treo vô hạn hoặc
+        # crash, khiến chỉ alert đầu tiên tới được Telegram. Bot mới mỗi lần
+        # → client bind đúng loop hiện tại → mọi re-alert đều gửi được.
         try:
-            await self.bot.send_photo(
-                chat_id=CHAT_ID, photo=img_io,
-                caption=caption, parse_mode='Markdown'
-            )
+            async with Bot(token=TELEGRAM_TOKEN) as bot:
+                await bot.send_photo(
+                    chat_id=CHAT_ID, photo=img_io,
+                    caption=caption, parse_mode='Markdown',
+                    read_timeout=20, write_timeout=20,
+                    connect_timeout=20,
+                )
             print(f"[{ts}] ✅ Đã gửi cảnh báo Telegram!")
         except Exception as e:
             print(f"❌ Lỗi Telegram: {e}")
