@@ -176,10 +176,19 @@ class OcclusionStateMachine:
             return StepResult(STATE_ALERT, elapsed, should,
                               self.trigger_reason or TRIGGER_FACE_LOST)
 
-        # 2b. Đã nghi rồi (occlusion_start set) + chưa quá gone_reset_sec →
-        # tiếp tục đếm BẤT KỂ YOLO. Một khi đã vào trạng thái nghi, không
-        # cho YOLO=False thắng — phải đợi face quay lại hoặc đủ ngưỡng alert.
-        if time_since <= self.gone_reset_sec and self.occlusion_start is not None:
+        # 2b. Đã nghi che (occlusion_start set) → tiếp tục đếm BẤT KỂ YOLO khi:
+        #   (a) ĐÃ bắn ≥1 alert trong event này (last_alert_at set) →
+        #       KHÔNG BAO GIỜ bỏ cuộc vì time-out. Mặt bị phủ kín làm MediaPipe
+        #       mất tracking + YOLO top-down trả False sai là kịch bản ngạt thở
+        #       chết người: phải re-alert mỗi repeat_alert_sec cho tới khi mặt
+        #       quay lại sạch (nhánh 1 mới được reset). Chấp nhận false-positive
+        #       (bế trẻ đi sau khi đã alert mà không quay lại khung) để TUYỆT
+        #       ĐỐI KHÔNG MISS cảnh báo thật. Đây là yêu cầu an toàn cốt lõi.
+        #   (b) HOẶC chưa alert nhưng còn trong gone_reset_sec window.
+        # Một khi đã vào trạng thái nghi, không cho YOLO=False thắng.
+        if self.occlusion_start is not None and (
+            self.last_alert_at is not None or time_since <= self.gone_reset_sec
+        ):
             elapsed, should = self._maybe_alert(now)
             return StepResult(STATE_ALERT, elapsed, should,
                               self.trigger_reason or TRIGGER_FACE_LOST)

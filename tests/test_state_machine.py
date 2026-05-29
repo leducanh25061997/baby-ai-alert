@@ -123,38 +123,63 @@ def test_face_lost_briefly_then_returns_no_alert():
     print("✅ test_face_lost_briefly_then_returns_no_alert")
 
 
-def test_face_gone_long_no_yolo_resets():
-    """Mặt mất quá lâu, không có YOLO → coi như rời khung, reset (tránh false alert)."""
-    fsm = OcclusionStateMachine(threshold_sec=15, gone_reset_sec=25)
+def test_face_lost_keeps_realerting_past_gone_reset():
+    """AN TOÀN CỐT LÕI: mặt bị phủ kín (face_lost) → SAU khi đã bắn alert đầu,
+    KHÔNG được tự reset vì time-out, mà phải re-alert mỗi threshold_sec đến khi
+    mặt quay lại.
+
+    Lý do: chăn/gối phủ kín → MediaPipe mất tracking + YOLO top-down trả False
+    sai → nếu reset sau gone_reset_sec thì trẻ ngạt thở chỉ nhận 1 cảnh báo rồi
+    im lặng (gửi 1 lần rồi thôi). Phải báo liên tục đến khi parent gỡ vật che.
+    """
+    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5, gone_reset_sec=25)
     fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
     fsm.step(now=0.5, face_present=False, occluded_by_histogram=False)
-    # Đến đây chưa quá gone_reset_sec, vẫn ALERT
-    r = fsm.step(now=10.0, face_present=False, occluded_by_histogram=False)
-    assert r.state == STATE_ALERT  # Vẫn còn trong khoảng đếm
-    # NHƯNG vì đếm liên tục không có break, sau 15s nó sẽ alert
-    # Kịch bản chuẩn: đến 15s đã alert, sau đó alert_sent=True nên không bắn nữa
-    r = fsm.step(now=15.5, face_present=False, occluded_by_histogram=False)
-    assert r.should_alert  # bắn 1 lần
-    r = fsm.step(now=16.0, face_present=False, occluded_by_histogram=False)
-    assert not r.should_alert  # không bắn nữa
 
-    # Reset state machine để test scenario "không alert, chỉ rời khung"
-    fsm2 = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5, gone_reset_sec=25)
-    # Mặt thấy 1 lần, sau đó biến mất nhưng lúc đó alert chưa kịp
-    # Để alert không kịp, ta cần giả lập: lần đầu thấy mặt rất xa quá khứ
-    # Thực tế: nếu mặt mất >25s liên tục thì sẽ reset
-    fsm2.step(now=0.0, face_present=True, occluded_by_histogram=False)
-    # Mất mặt ngay
-    fsm2.step(now=1.0, face_present=False, occluded_by_histogram=False)
-    # Skip qua mốc alert (15s) — alert đã bắn
-    r = fsm2.step(now=20.0, face_present=False, occluded_by_histogram=False)
-    assert fsm2.alert_sent  # đã bắn rồi
-    # Sau gone_reset_sec (25s) — reset
-    r = fsm2.step(now=30.0, face_present=False, occluded_by_histogram=False)
-    assert r.state == STATE_NO_FACE
-    assert fsm2.occlusion_start is None
-    assert not fsm2.alert_sent
-    print("✅ test_face_gone_long_no_yolo_resets")
+    # Mặt mất liên tục, KHÔNG có YOLO (person_in_frame=None) — kịch bản top-down.
+    fired = []
+    t = 0.5
+    while t < 75.0:
+        r = fsm.step(now=t, face_present=False, occluded_by_histogram=False,
+                     person_in_frame=None)
+        if r.should_alert:
+            fired.append(round(t, 1))
+        t += 0.1
+    # Kỳ vọng: re-alert mỗi 15s (~15, 30, 45, 60) — KHÔNG dừng lại sau gone_reset.
+    assert len(fired) == 4, (
+        f"Phải re-alert mỗi 15s khi vẫn mất mặt; thực tế {len(fired)} tại {fired}"
+    )
+    for i in range(1, len(fired)):
+        gap = fired[i] - fired[i - 1]
+        assert 14.9 < gap < 15.2, f"Gap {gap:.2f}s không đúng 15s"
+    # Vẫn đang ALERT, chưa reset
+    assert fsm.occlusion_start is not None
+    print("✅ test_face_lost_keeps_realerting_past_gone_reset")
+
+
+def test_face_lost_returns_clean_then_resets():
+    """Sau khi mất mặt + alert, nếu mặt quay lại SẠCH đủ lâu → reset về SAFE
+    (parent đã gỡ vật che). Đây là đường reset hợp lệ duy nhất sau khi đã alert."""
+    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5,
+                                 gone_reset_sec=25, safe_recovery_sec=1.5)
+    fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
+    fsm.step(now=0.5, face_present=False, occluded_by_histogram=False)
+    # Bắn alert đầu ở ngưỡng 15s (cần đạt ngưỡng trong gone_reset window)
+    r = fsm.step(now=15.0, face_present=False, occluded_by_histogram=False)
+    assert r.should_alert
+    # Vẫn mất mặt tới 40s (đã quá gone_reset 25s) — KHÔNG reset vì đã alert
+    r = fsm.step(now=40.0, face_present=False, occluded_by_histogram=False)
+    assert r.state == STATE_ALERT
+    assert fsm.alert_sent
+    # Mặt quay lại sạch — anti-flicker 0.5s chưa đủ
+    r = fsm.step(now=40.5, face_present=True, occluded_by_histogram=False)
+    assert r.state == STATE_ALERT
+    # Sạch đủ lâu (1.5s) → reset về SAFE
+    r = fsm.step(now=42.0, face_present=True, occluded_by_histogram=False)
+    assert r.state == STATE_SAFE
+    assert fsm.occlusion_start is None
+    assert not fsm.alert_sent
+    print("✅ test_face_lost_returns_clean_then_resets")
 
 
 def test_yolo_no_person_in_grace_still_alerts():
@@ -325,7 +350,8 @@ if __name__ == "__main__":
         test_histogram_recovery_resets,
         test_face_lost_critical_bug_fix,
         test_face_lost_briefly_then_returns_no_alert,
-        test_face_gone_long_no_yolo_resets,
+        test_face_lost_keeps_realerting_past_gone_reset,
+        test_face_lost_returns_clean_then_resets,
         test_yolo_no_person_in_grace_still_alerts,
         test_yolo_no_person_no_prior_face_resets,
         test_yolo_person_present_keeps_counting_beyond_grace,

@@ -275,6 +275,11 @@ class BabyMonitorV5:
         )
         self.last_alert_time = 0.0
         self._prev_in_alert  = False
+        # occlusion_start của event đã LƯU ẢNH gần nhất. Dùng để chỉ lưu
+        # ảnh+json cho alert ĐẦU của mỗi event; các lần re-alert (mỗi 15s khi
+        # vẫn còn bị che) chỉ gửi Telegram + log, KHÔNG ghi file trùng xuống
+        # events/ (tránh phình đĩa khi che kéo dài / false-positive lâu).
+        self._last_saved_occlusion_start = None
         # Trigger để recalibrate (set bởi 'R' hotkey hoặc SIGUSR1).
         self._recal_request  = threading.Event()
         # Theo dõi để auto-recalibrate khi safe lâu.
@@ -392,11 +397,13 @@ class BabyMonitorV5:
         except Exception as e:
             print(f"❌ Lỗi Telegram: {e}")
 
-    def _dispatch_alert(self, frame, elapsed, result, trigger):
+    def _dispatch_alert(self, frame, elapsed, result, trigger, save_image=True):
         status = ("FULLY_COVERED" if trigger == TRIGGER_FACE_LOST
                   else "POSSIBLE_OCCLUSION")
         snap = frame.copy()
-        self._save_event(snap, status, result, trigger)
+        # Chỉ lưu ảnh+json cho alert đầu của event; re-alert chỉ gửi Telegram.
+        if save_image:
+            self._save_event(snap, status, result, trigger)
         threading.Thread(
             target=lambda: asyncio.run(
                 self.send_alert(snap, elapsed, result, trigger)
@@ -767,10 +774,24 @@ class BabyMonitorV5:
                         trigger = result_fsm.trigger
 
                         if result_fsm.should_alert:
-                            print(f"🚨 Đủ ngưỡng {OCCLUSION_THRESHOLD_SEC}s — "
-                                  f"trigger={trigger} elapsed={elapsed:.1f}s")
+                            # Alert đầu của event (occlusion_start mới) → lưu ảnh.
+                            # Re-alert cùng event → chỉ gửi Telegram + log.
+                            is_first_alert = (
+                                self.fsm.occlusion_start
+                                != self._last_saved_occlusion_start
+                            )
+                            if is_first_alert:
+                                self._last_saved_occlusion_start = (
+                                    self.fsm.occlusion_start
+                                )
+                            kind = "CẢNH BÁO ĐẦU" if is_first_alert else "RE-ALERT"
+                            print(f"🚨 Đủ ngưỡng {OCCLUSION_THRESHOLD_SEC}s "
+                                  f"({kind}) — trigger={trigger} "
+                                  f"elapsed={elapsed:.1f}s"
+                                  + ("" if is_first_alert else " (không lưu ảnh trùng)"))
                             self._dispatch_alert(frame, elapsed,
-                                                 check_result, trigger)
+                                                 check_result, trigger,
+                                                 save_image=is_first_alert)
 
                         # === Auto-recalibrate sau N giây safe liên tục ===
                         if AUTO_RECAL_AFTER_SEC > 0 and state == STATE_SAFE:

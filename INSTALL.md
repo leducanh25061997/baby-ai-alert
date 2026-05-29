@@ -502,7 +502,7 @@ chmod +x /opt/baby-monitor/run.sh
 | 3 | **Chăn phủ kín mặt 15s+** | Votes 4/4 ngay. Sau 15s → Telegram alert (hoặc `Mất hoàn toàn khuôn mặt` nếu mediapipe mất tracking) |
 | 4 | **Rời khung (KHÔNG alert)** | Bước hẳn ra ngoài camera → YOLO không thấy người → state `NO_FACE`, KHÔNG gửi tin |
 
-Mỗi alert lưu `events/possible_suffocation_risk_<timestamp>.jpg` + `.json` (kèm tất cả 4 signal values).
+Mỗi **event** lưu `events/possible_suffocation_risk_<timestamp>.jpg` + `.json` (kèm tất cả 4 signal values) ở lần cảnh báo ĐẦU. Khi vẫn còn bị che, hệ thống re-alert Telegram mỗi 15s (kèm ảnh hiện tại) nhưng KHÔNG ghi thêm file trùng xuống `events/` — tránh phình đĩa khi che kéo dài.
 
 ### 9.3 Recalibration (khi cần)
 
