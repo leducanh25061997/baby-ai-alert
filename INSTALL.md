@@ -539,6 +539,42 @@ HEADLESS=0 python src/main.py
 
 ## 10. Autostart bằng systemd
 
+> 🎯 **Mục tiêu**: cắm điện → OPi boot → app **tự chạy**, không cần gõ lệnh.
+> Mất điện/reboot → tự chạy lại. App crash → systemd tự khởi động lại sau 10s.
+
+### 10.0 Cài 1 lệnh (KHUYẾN NGHỊ)
+
+Đã có script tự động xử lý mọi thứ (sinh service file đúng path/user, file log,
+logrotate 7 ngày, cron dọn `events/`, enable + start):
+
+```bash
+sudo bash scripts/setup_autostart.sh
+```
+
+Script tự phát hiện project dir, venv python, user (không chạy dưới root), và
+thêm user vào group `video` nếu thiếu. Service file mẫu nằm ở
+[deploy/baby-monitor.service](deploy/baby-monitor.service) — đã vá sẵn:
+- `network-online.target` (chờ có internet thật → alert Telegram đầu không trượt)
+- `ExecStartPre` chờ `/dev/video0` tối đa 30s (USB webcam chưa sẵn ngay lúc boot)
+- `Restart=always` + `MemoryMax=1G` cho chạy 24/7
+
+Chạy **1 lần duy nhất**. Từ đó mỗi lần boot tự chạy, **không cần gõ gì nữa**.
+
+```bash
+# Kiểm tra
+sudo systemctl status baby-monitor
+journalctl -u baby-monitor -f
+
+# Tạm dừng để dev (giải phóng camera)
+sudo systemctl stop baby-monitor
+
+# Gỡ tự-chạy
+sudo bash scripts/setup_autostart.sh --uninstall
+```
+
+> Các mục §10.1–§10.5 dưới đây là **cách làm tay từng bước** (để hiểu rõ hoặc
+> khi muốn tuỳ biến). Đã chạy script §10.0 thì bỏ qua được.
+
 ### 10.1 Tạo service file
 
 ```bash

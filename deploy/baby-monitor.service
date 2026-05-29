@@ -1,0 +1,48 @@
+# ============================================================================
+#  Baby AI Alert — systemd service (autostart khi boot Orange Pi)
+# ============================================================================
+#  ĐÂY LÀ TEMPLATE. Đừng copy thẳng file này vào /etc/systemd/system/.
+#  Chạy `sudo bash scripts/setup_autostart.sh` — script sẽ tự điền các
+#  placeholder __USER__ / __GROUP__ / __PROJECT_DIR__ / __PYTHON__ cho đúng
+#  máy của bạn rồi cài đặt.
+#
+#  (Nếu muốn cài tay: thay 4 placeholder bên dưới bằng giá trị thật.)
+# ============================================================================
+
+[Unit]
+Description=Baby AI Alert Monitor (phat hien ngat tho tre em)
+# network-online.target (KHÔNG phải network.target) — đảm bảo ĐÃ CÓ IP/internet
+# thật trước khi start, để alert Telegram đầu tiên không bị trượt khi vừa boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__PROJECT_DIR__
+
+# .env chỉ cần khi muốn override token/camera/threshold (xem INSTALL.md §7).
+# Prefix `-` = không fail nếu file không tồn tại (default đã hardcode trong code).
+EnvironmentFile=-__PROJECT_DIR__/.env
+
+# Chờ USB webcam enumerate xong trước khi start (camera hay chưa sẵn ngay lúc
+# boot). Chờ tối đa 30s cho /dev/video0; hết 30s vẫn start (app tự retry 60
+# frame rồi systemd restart). `exit 0` luôn để không chặn vòng restart.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/video0 ] && exit 0; sleep 1; done; echo "[setup] /dev/video0 chua thay sau 30s, van start (app se retry)"; exit 0'
+
+ExecStart=__PYTHON__ __PROJECT_DIR__/src/main.py
+
+# App crash / camera mất / OOM → tự khởi động lại sau 10s. KHÔNG bao giờ bỏ cuộc.
+Restart=always
+RestartSec=10
+
+# Tự restart nếu rò rỉ bộ nhớ vượt 1GB (phòng xa cho chạy 24/7 nhiều tháng).
+MemoryMax=1G
+
+# Ghi log (heartbeat tiếng Việt + alert) ra file để vận hành theo dõi.
+StandardOutput=append:/var/log/baby-monitor.log
+StandardError=append:/var/log/baby-monitor.log
+
+[Install]
+WantedBy=multi-user.target
