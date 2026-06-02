@@ -2,7 +2,7 @@
 
 Phiên bản cài đặt cho board nhúng **Orange Pi 5 / 5B / 5 Plus** (RK3588 SoC, Linux ARM64).
 
-> 🍓 **Chạy trên Raspberry Pi 4?** Toàn bộ hướng dẫn dưới đây áp dụng gần như y nguyên (code KHÔNG đổi dòng nào) — chỉ khác vài điểm về hiệu năng/OS. Xem [Phụ lục A — Raspberry Pi 4](#phụ-lục-a--chạy-trên-raspberry-pi-4) ở cuối file.
+> 🍓 **Chạy trên Raspberry Pi 4?** Đã có **hướng dẫn độc lập, chi tiết riêng cho Pi 4**: [INSTALL_PI4.md](INSTALL_PI4.md) (Raspberry Pi OS 64-bit, PEP 668/venv, `vcgencmd`, GPIO `lgpio`, Coral TPU…). Code KHÔNG đổi dòng nào — chỉ khác OS + một file `.env`. Bản tóm tắt nhanh vẫn ở [Phụ lục A](#phụ-lục-a--chạy-trên-raspberry-pi-4) cuối file này.
 
 ## Mục lục
 
@@ -939,6 +939,8 @@ Gửi `diag.txt` + mô tả tình huống.
 ---
 
 ## Phụ lục A — Chạy trên Raspberry Pi 4
+
+> 📖 **Bản đầy đủ, từng bước cho Pi 4 nằm ở file riêng:** [INSTALL_PI4.md](INSTALL_PI4.md) — gồm flash Raspberry Pi OS 64-bit, swap dphys, PEP 668/venv, kiểm tra throttle bằng `vcgencmd`, GPIO `lgpio`, Coral USB TPU, troubleshooting riêng Pi 4. Phụ lục A dưới đây chỉ là bản **tóm tắt nhanh**.
 
 > 🎯 Mục tiêu phụ lục: chạy được trên **Raspberry Pi 4** mà **giữ nguyên 100% code và toàn bộ setup Orange Pi** ở trên. Muốn quay lại OPi 5 → chỉ việc xoá file `.env` là code tự dùng lại default OPi.
 

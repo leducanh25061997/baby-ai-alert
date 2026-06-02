@@ -1,0 +1,11 @@
+{
+  "event_type": "possible_suffocation_risk",
+  "time": "2026-05-11 21:40:33",
+  "extra": {
+    "status": "POSSIBLE_OCCLUSION",
+    "lower_score": 0.5071813101810916,
+    "upper_score": 0.3438220653677991,
+    "alert_seconds": 15,
+    "trigger": "histogram"
+  }
+}

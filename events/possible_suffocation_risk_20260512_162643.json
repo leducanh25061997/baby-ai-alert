@@ -1,0 +1,20 @@
+{
+  "event_type": "possible_suffocation_risk",
+  "time": "2026-05-12 16:26:43",
+  "extra": {
+    "status": "POSSIBLE_OCCLUSION",
+    "alert_seconds": 15,
+    "trigger": "histogram",
+    "calibration_quality": 0.9217301758734293,
+    "upper_score": 0.9600853076016408,
+    "lower_score": 0.3071430796548392,
+    "nose_skin_ratio": 1.0,
+    "mouth_skin_ratio": 1.0,
+    "nose_edge_density": 0.0,
+    "mouth_edge_density": 0.0,
+    "nose_lap_var": 14.47013424,
+    "mouth_lap_var": 12.88933424,
+    "nose_votes": 2,
+    "mouth_votes": 3
+  }
+}
