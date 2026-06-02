@@ -133,6 +133,11 @@ CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "0")
 CAMERA_WIDTH  = int(os.environ.get("CAMERA_WIDTH",  "1280"))
 CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT",  "720"))
 CAMERA_FPS    = int(os.environ.get("CAMERA_FPS",     "30"))
+# Autofocus: MẶC ĐỊNH BẬT (1). Tắt autofocus + đối tượng đổi khoảng cách → ảnh
+# out-focus → vùng mũi/miệng mờ → edge/lap_var tụt về ~0 → detector tưởng "bị
+# che" → FALSE ALERT. Chỉ nên tắt (CAMERA_AUTOFOCUS=0) khi camera + trẻ cố định
+# tuyệt đối và bạn muốn tránh autofocus "hunting".
+CAMERA_AUTOFOCUS = os.environ.get("CAMERA_AUTOFOCUS", "1").lower() in ("1", "true", "yes")
 
 # Production trên OPi không có HDMI → default headless=1.
 # Dev local muốn xem live view: set HEADLESS=0 khi chạy.
@@ -616,7 +621,9 @@ class BabyMonitorV5:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS,          CAMERA_FPS)
         cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-        cap.set(cv2.CAP_PROP_AUTOFOCUS,    0)
+        # Autofocus ON mặc định — tắt nó là thủ phạm chính gây false alert khi
+        # đối tượng đổi khoảng cách (ảnh mờ → edge/lap_var ~0 → tưởng bị che).
+        cap.set(cv2.CAP_PROP_AUTOFOCUS,    1 if CAMERA_AUTOFOCUS else 0)
 
         actual_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -628,6 +635,8 @@ class BabyMonitorV5:
             print(f"   → Strict mode: KHÔNG dùng multi-signal voting.")
             print(f"   → MediaPipe confidence cao ({MP_DETECTION_CONFIDENCE}) — face_lost trigger handle alert")
         print(f"   Camera           : {src} → {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
+        print(f"   Autofocus        : {'BẬT' if CAMERA_AUTOFOCUS else 'TẮT'} "
+              f"(CAMERA_AUTOFOCUS để đổi)")
         print(f"   Calibration      : {CALIBRATION_SEC}s")
         print(f"   Cảnh báo sau     : {OCCLUSION_THRESHOLD_SEC}s")
         print(f"   Auto-recal       : sau {AUTO_RECAL_AFTER_SEC}s safe liên tục"
