@@ -11,10 +11,13 @@
 
 [Unit]
 Description=Baby AI Alert Monitor (phat hien ngat tho tre em)
-# network-online.target (KHÔNG phải network.target) — đảm bảo ĐÃ CÓ IP/internet
-# thật trước khi start, để alert Telegram đầu tiên không bị trượt khi vừa boot.
-After=network-online.target
-Wants=network-online.target
+# network.target (KHÔNG dùng network-online.target) — camera KHÔNG cần mạng để
+# chạy, chỉ Telegram cần. Chờ network-online trên Pi 4 + WiFi hay treo 15-30s,
+# làm camera khởi chạy muộn oan. Alert Telegram đầu tiên chỉ xảy ra sau khi
+# calibrate + bị che >=15s (đã rất lâu sau boot) nên mạng chắc chắn đã lên;
+# nếu lúc đó vẫn rớt mạng, app tự retry gửi lại. → start sớm, không chờ mạng.
+After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
