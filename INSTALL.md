@@ -2,6 +2,8 @@
 
 Phiên bản cài đặt cho board nhúng **Orange Pi 5 / 5B / 5 Plus** (RK3588 SoC, Linux ARM64).
 
+> 🍓 **Chạy trên Raspberry Pi 4?** Toàn bộ hướng dẫn dưới đây áp dụng gần như y nguyên (code KHÔNG đổi dòng nào) — chỉ khác vài điểm về hiệu năng/OS. Xem [Phụ lục A — Raspberry Pi 4](#phụ-lục-a--chạy-trên-raspberry-pi-4) ở cuối file.
+
 ## Mục lục
 
 1. [Phần cứng đang dùng](#1-phần-cứng-đang-dùng)
@@ -17,6 +19,10 @@ Phiên bản cài đặt cho board nhúng **Orange Pi 5 / 5B / 5 Plus** (RK3588 
 11. [(Optional) Tăng tốc bằng NPU RK3588](#11-optional-tăng-tốc-bằng-npu-rk3588)
 12. [(Optional) Kích relay khi có cảnh báo](#12-optional-kích-relay-khi-có-cảnh-báo)
 13. [Troubleshooting](#13-troubleshooting)
+
+**Theo từng thiết bị:**
+- 🟠 **Orange Pi 5 / 5B / 5 Plus** (mặc định) → §1–§15 ở trên.
+- 🍓 **Raspberry Pi 4** → [Phụ lục A](#phụ-lục-a--chạy-trên-raspberry-pi-4) (dùng chung §1–§15, chỉ khác OS + `.env`, code không đổi).
 
 > 📌 **CPU-only**: Project KHÔNG hỗ trợ NVIDIA GPU (RK3588 không có CUDA).
 > Toàn bộ pipeline chạy trên CPU; muốn tăng tốc YOLO trên OPi 5 → dùng NPU 6 TOPS qua RKNN (§11).
@@ -929,3 +935,93 @@ python scripts/benchmark.py --frames 50 >> diag.txt 2>&1
 ```
 
 Gửi `diag.txt` + mô tả tình huống.
+
+---
+
+## Phụ lục A — Chạy trên Raspberry Pi 4
+
+> 🎯 Mục tiêu phụ lục: chạy được trên **Raspberry Pi 4** mà **giữ nguyên 100% code và toàn bộ setup Orange Pi** ở trên. Muốn quay lại OPi 5 → chỉ việc xoá file `.env` là code tự dùng lại default OPi.
+
+### A.0 Tóm tắt: phải đổi gì?
+
+| Hạng mục | Orange Pi 5 | Raspberry Pi 4 | Cần sửa code? |
+|---|---|---|---|
+| **Code logic** (`src/`) | — | **y nguyên** | ❌ Không |
+| `requirements.txt` | dùng nguyên | **dùng nguyên** (Pi 4 cũng aarch64, không CUDA) | ❌ Không |
+| `install_opi.sh` / `setup_autostart.sh` | dùng nguyên | **dùng nguyên** (cùng systemd, cùng V4L2) | ❌ Không |
+| **OS** | Ubuntu 22.04 ARM64 | **Raspberry Pi OS 64-bit** (Bookworm) — BẮT BUỘC 64-bit | — |
+| **Python** | 3.9–3.11 | 3.9–3.11 (Bookworm có sẵn 3.11 ✅) | — |
+| **Resolution / FPS** | 1280×720 @30 (mặc định code) | **640×480 @15** (qua `.env`) | ❌ chỉ `.env` |
+| `YOLO_EVERY` | 5 (mặc định code) | **10** (qua `.env`) | ❌ chỉ `.env` |
+| **NPU tăng tốc** (§11) | có (RKNN 6 TOPS) | **không có** (Pi 4 không NPU) | — |
+| **GPIO relay** (§12) | `OPi.GPIO`, chân BCM của OPi | `RPi.GPIO`/`lgpio`, chân BCM của Pi | ✅ nếu có dùng relay |
+
+→ Việc cần làm thực chất chỉ là: **(1) flash đúng OS 64-bit, (2) tạo 1 file `.env`, (3) cài như §5**. Không đụng tới logic.
+
+### A.1 Vì sao Pi 4 cần `.env` mà OPi không
+
+Pi 4 dùng 4 nhân Cortex-A72 @1.5–1.8GHz — yếu hơn RK3588 (8 nhân A76+A55) khoảng **3–4 lần**. Benchmark §8.4 trên OPi cho ~80–100ms/frame (10–12 FPS) ở 720p; trên Pi 4 ở 720p dễ tụt xuống **~4–6 FPS**, đụng đúng sàn "cần ≥6 FPS" của state machine. Hạ về 640×480 và giãn YOLO lấy lại FPS an toàn — tất cả qua env, **không sửa code**.
+
+### A.2 Cài đặt (chỉ khác 3 chỗ so với phần Orange Pi)
+
+**1) OS — phải là 64-bit.** Dùng Raspberry Pi Imager, chọn **Raspberry Pi OS (64-bit)** (Bookworm). ⚠️ Tuyệt đối **không** dùng bản 32-bit (armv7l): MediaPipe **không có wheel** cho 32-bit → `pip install` sẽ fail. Verify sau khi boot:
+```bash
+uname -m      # PHẢI ra: aarch64  (nếu ra armv7l → đang chạy 32-bit, flash lại)
+python3 --version   # nên 3.11 trên Bookworm
+```
+
+**2) RAM + swap.** Nên dùng bản Pi 4 **4GB hoặc 8GB**. Bản 1/2GB sẽ OOM lúc `pip install mediapipe` → tạo swap như [§3.4](#34-tạo-swap-board-ram-nhỏ).
+
+**3) Cài deps — y hệt §4 và §5.** Các script chạy nguyên (tên là `install_opi.sh` nhưng nội dung generic cho mọi ARM64 CPU-only; phần fix `/tmp` tmpfs vô hại trên Pi OS vì `/tmp` nằm trên thẻ SD):
+```bash
+sudo apt install -y python3 python3-pip python3-venv python3-dev \
+    build-essential cmake pkg-config git libopencv-dev \
+    libjpeg-dev libpng-dev libtiff-dev libv4l-dev v4l-utils \
+    libatlas-base-dev gfortran libffi-dev libssl-dev
+sudo usermod -aG video $USER     # logout/login lại
+
+bash scripts/install_opi.sh      # cài torch<2.4 CPU-only + requirements + smoke test
+```
+
+### A.3 Tạo `.env` cho Pi 4 (BẮT BUỘC trên Pi 4)
+
+Đã có sẵn file mẫu tune cho Pi 4 — chỉ cần copy và sửa token:
+```bash
+cp .env.pi4.example .env
+nano .env            # đổi TELEGRAM_TOKEN + TELEGRAM_CHAT_ID
+chmod 600 .env       # bảo vệ token
+```
+
+`.env.pi4.example` đã set sẵn `CAMERA_WIDTH=640 / CAMERA_HEIGHT=480 / CAMERA_FPS=15 / YOLO_EVERY=10 / HEADLESS=1`. Các biến khác xem bảng §7. Khi đã có `.env`, chạy bằng `run.sh` (§9.1.1) hoặc systemd (service tự đọc `EnvironmentFile=-.env`).
+
+### A.4 Verify hiệu năng riêng cho Pi 4
+
+```bash
+# Benchmark ở 480p (đặt env tạm để đo đúng cấu hình production)
+CAMERA_WIDTH=640 CAMERA_HEIGHT=480 python scripts/benchmark.py --frames 100
+```
+Kỳ vọng trên Pi 4 (CPU, 480p): end-to-end **~120–180ms (~6–8 FPS)**. Miễn là **≥6 FPS** là state machine + smoother chạy đúng. Nếu < 6 FPS:
+- Hạ thêm: `CAMERA_WIDTH=480 CAMERA_HEIGHT=360`
+- Tăng `YOLO_EVERY=15`, hoặc đặt `DETECTION_MODE=strict` (bỏ multi-signal, tiết kiệm 6–12ms/frame)
+- Đảm bảo có **tản nhiệt** (Pi 4 cũng throttle khi nóng): `vcgencmd measure_temp` — nếu > 80°C cần quạt/heatsink.
+
+### A.5 Autostart — y nguyên §10
+
+`setup_autostart.sh` tự dò user/group/python/path nên chạy **không sửa gì**:
+```bash
+sudo bash scripts/setup_autostart.sh
+```
+Service đã có `EnvironmentFile=-.env` nên file `.env` ở A.3 được nạp tự động khi boot.
+
+### A.6 Những thứ KHÔNG có / khác trên Pi 4
+
+- **NPU (§11): không áp dụng.** Pi 4 không có NPU → YOLO buộc chạy CPU. Muốn tăng tốc YOLO trên Pi 4 phải gắn **Google Coral USB TPU** (việc riêng, không nằm trong scope hiện tại).
+- **GPIO relay (§12):** nếu có dùng, đổi thư viện `OPi.GPIO` → `RPi.GPIO` (hoặc `lgpio` trên Bookworm) và tra lại số chân BCM của Pi 4 (layout 40-pin tương thích vật lý nhưng mapping GPIO khác OPi). Chưa wire vào code nên không ảnh hưởng nếu không dùng.
+
+### A.7 Quay lại Orange Pi 5
+
+```bash
+rm .env        # hoặc: mv .env .env.pi4.bak
+sudo systemctl restart baby-monitor
+```
+Xoá `.env` → code tự dùng lại default đã tune cho OPi (1280×720 @30, YOLO_EVERY=5). Không cần đụng code hay script.
