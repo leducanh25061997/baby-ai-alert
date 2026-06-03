@@ -75,13 +75,17 @@ from telegram import Bot
 
 from state_machine import (
     OcclusionStateMachine,
-    STATE_ALERT, STATE_SAFE, STATE_NO_FACE, STATE_CALIBRATING,
-    TRIGGER_FACE_LOST,
+    STATE_SAFE, STATE_COVERED, STATE_NO_PERSON,
+    TRIGGER_COVERED, TRIGGER_NO_PERSON,
 )
 from occlusion_detector import (
     OcclusionDetector, CheckResult,
     NOSE_TIP, MOUTH_CENTER, PATCH_SIZE,
 )
+
+# Trạng thái CALIBRATING chỉ dùng cho UI/log lúc hiệu chỉnh — không thuộc
+# state machine (state machine chỉ lo SAFE/COVERED/NO_PERSON).
+STATE_CALIBRATING = "CALIBRATING"
 from scene_monitor import SceneMonitor
 from alert_policy import (
     Watchdog, HeartbeatPolicy, CalibrationReminder, CalibrationConditionWarner,
@@ -105,7 +109,13 @@ TELEGRAM_TOKEN = os.environ.get(
 )
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7316578932")
 
+# Che mũi/miệng kéo dài bao lâu thì gửi thông báo.
 OCCLUSION_THRESHOLD_SEC = int(os.environ.get("OCCLUSION_THRESHOLD_SEC", "15"))
+# Không thấy ai trong khung kéo dài bao lâu thì gửi thông báo "mất người".
+NO_PERSON_SEC           = int(os.environ.get("NO_PERSON_SEC", "15"))
+# Giữ trạng thái "có người" thêm bao lâu sau khi MẤT tín hiệu (mặt + YOLO) →
+# chống MediaPipe rớt track chập chờn trên Pi 4 bị hiểu nhầm thành "mất người".
+PRESENCE_HOLD_SEC       = float(os.environ.get("PRESENCE_HOLD_SEC", "2.0"))
 # Spam control trong send_alert chỉ là defense-in-depth chống race condition
 # (state_machine đã quản lý timing chính: re-alert mỗi OCCLUSION_THRESHOLD_SEC).
 # Đặt mặc định 5s — đủ chặn double-fire frame-level mà không chặn re-alert
@@ -121,9 +131,6 @@ MIN_QUALITY_WARN        = float(os.environ.get("MIN_QUALITY_WARN",      "0.5"))
 # Mỗi N giây in lại trạng thái hiện tại để vận hành biết hệ thống vẫn sống và
 # đang ở trạng thái nào. State chuyển → luôn in ngay không phụ thuộc giá trị này.
 LOG_INTERVAL_SEC        = float(os.environ.get("LOG_INTERVAL_SEC",      "5"))
-
-FACE_LOST_GRACE_SEC     = 1.5
-FACE_GONE_RESET_SEC     = OCCLUSION_THRESHOLD_SEC + 10
 
 # Auto re-calibrate sau khi safe liên tục bao lâu (giúp adapt môi trường đổi
 # dần). 0 = tắt. Default 30 phút.
@@ -167,36 +174,18 @@ CAMERA_WIDTH  = int(os.environ.get("CAMERA_WIDTH",  "640"))
 CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "480"))
 CAMERA_FPS    = int(os.environ.get("CAMERA_FPS",    "15"))
 # Autofocus: MẶC ĐỊNH BẬT (1). Tắt autofocus + đối tượng đổi khoảng cách → ảnh
-# out-focus → vùng mũi/miệng mờ → edge/lap_var tụt về ~0 → detector tưởng "bị
-# che" → FALSE ALERT. Chỉ nên tắt (CAMERA_AUTOFOCUS=0) khi camera + trẻ cố định
-# tuyệt đối và bạn muốn tránh autofocus "hunting".
+# out-focus → MediaPipe dễ rớt track + histogram vùng mũi/miệng nhiễu. Chỉ nên
+# tắt (CAMERA_AUTOFOCUS=0) khi camera + trẻ cố định tuyệt đối, tránh autofocus
+# "hunting".
 CAMERA_AUTOFOCUS = os.environ.get("CAMERA_AUTOFOCUS", "1").lower() in ("1", "true", "yes")
 
 # Production trên Pi 4 không có HDMI → default headless=1.
 # Dev local muốn xem live view: set HEADLESS=0 khi chạy.
 HEADLESS = os.environ.get("HEADLESS", "1").lower() in ("1", "true", "yes")
 
-# Detection mode — chọn cách phát hiện che mũi/miệng:
-#   "multi_signal" (default): 4-signal voting (histogram + skin + edge + lap_var).
-#                  Có thể bị defeat bởi khăn có nếp / patterned blanket.
-#   "strict":      bỏ multi-signal, dùng face_mesh confidence cao (0.85). Khi
-#                  mặt bị che một phần → confidence drop → face_lost trigger
-#                  alert sau 15s. SAFETY-FIRST: nhiều false positive (mặt nghiêng,
-#                  ánh sáng kém) NHƯNG không miss khi thật sự bị che.
-DETECTION_MODE = os.environ.get("DETECTION_MODE", "multi_signal").lower()
-if DETECTION_MODE not in ("multi_signal", "strict"):
-    print(f"⚠️  DETECTION_MODE={DETECTION_MODE} không hợp lệ, fallback multi_signal")
-    DETECTION_MODE = "multi_signal"
-
-# Mediapipe confidence — strict mode dùng giá trị cao để dễ trigger face_lost
-MP_DETECTION_CONFIDENCE = (
-    0.85 if DETECTION_MODE == "strict"
-    else float(os.environ.get("MP_DETECTION_CONFIDENCE", "0.6"))
-)
-MP_TRACKING_CONFIDENCE = (
-    0.85 if DETECTION_MODE == "strict"
-    else float(os.environ.get("MP_TRACKING_CONFIDENCE", "0.6"))
-)
+# Mediapipe confidence cho FaceMesh.
+MP_DETECTION_CONFIDENCE = float(os.environ.get("MP_DETECTION_CONFIDENCE", "0.6"))
+MP_TRACKING_CONFIDENCE  = float(os.environ.get("MP_TRACKING_CONFIDENCE", "0.6"))
 
 PROJECT_ROOT    = Path(__file__).resolve().parent.parent
 EVENTS_DIR      = PROJECT_ROOT / "events"
@@ -310,10 +299,12 @@ class BabyMonitorV5:
             blur_drop_frac = BLUR_DROP_FRAC,
         )
         self.fsm             = OcclusionStateMachine(
-            threshold_sec  = OCCLUSION_THRESHOLD_SEC,
-            grace_sec      = FACE_LOST_GRACE_SEC,
-            gone_reset_sec = FACE_GONE_RESET_SEC,
+            threshold_sec = OCCLUSION_THRESHOLD_SEC,
+            no_person_sec = NO_PERSON_SEC,
         )
+        # Giữ "có người" thêm PRESENCE_HOLD_SEC sau lần thấy mặt/người gần nhất
+        # → MediaPipe rớt track vài frame KHÔNG bị hiểu nhầm thành "mất người".
+        self._last_present_t = None
         self.last_alert_time = 0.0
         self._prev_in_alert  = False
         # --- Policy timing thuần (test ở tests/test_alert_policy.py) ---
@@ -356,9 +347,10 @@ class BabyMonitorV5:
     def _save_event(self, frame, status, result, trigger):
         ts_file = datetime.now().strftime("%Y%m%d_%H%M%S")
         ts_iso  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        event_type = "no_person" if trigger == TRIGGER_NO_PERSON else "face_covered"
         try:
-            jpg_path  = EVENTS_DIR / f"face_covered_{ts_file}.jpg"
-            json_path = EVENTS_DIR / f"face_covered_{ts_file}.json"
+            jpg_path  = EVENTS_DIR / f"{event_type}_{ts_file}.jpg"
+            json_path = EVENTS_DIR / f"{event_type}_{ts_file}.json"
             cv2.imwrite(str(jpg_path), frame)
             extra = {
                 "status": status,
@@ -367,21 +359,16 @@ class BabyMonitorV5:
                 "calibration_quality": self.detector.calibration_quality,
             }
             if result is not None:
-                # Giữ tên 'upper'/'lower' cho khớp schema cũ
                 extra.update({
-                    "upper_score": float(result.nose_hist_corr),
-                    "lower_score": float(result.mouth_hist_corr),
+                    "nose_hist_corr": float(result.nose_hist_corr),
+                    "mouth_hist_corr": float(result.mouth_hist_corr),
                     "nose_skin_ratio": float(result.nose_skin_ratio),
                     "mouth_skin_ratio": float(result.mouth_skin_ratio),
-                    "nose_edge_density": float(result.nose_edge_density),
-                    "mouth_edge_density": float(result.mouth_edge_density),
-                    "nose_lap_var": float(result.nose_lap_var),
-                    "mouth_lap_var": float(result.mouth_lap_var),
                     "nose_votes": int(result.nose_votes_for_occluded),
                     "mouth_votes": int(result.mouth_votes_for_occluded),
                 })
             payload = {
-                "event_type": "face_covered",
+                "event_type": event_type,
                 "time": ts_iso,
                 "extra": extra,
             }
@@ -402,32 +389,31 @@ class BabyMonitorV5:
         _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
         jpg_bytes = buf.tobytes()   # giữ bytes để tạo BytesIO mới cho mỗi lần retry
 
-        if trigger == TRIGGER_FACE_LOST:
-            reason_block = "🫥 Mất hoàn toàn khuôn mặt — nghi bị phủ kín bởi vật lạ"
-        elif result is not None:
-            reason_block = (
-                f"👃 Mũi vote: `{result.nose_votes_for_occluded}/4`  "
-                f"hist=`{result.nose_hist_corr:.2f}` "
-                f"skin=`{result.nose_skin_ratio:.2f}` "
-                f"edge=`{result.nose_edge_density:.3f}` "
-                f"lap=`{result.nose_lap_var:.0f}`\n"
-                f"👄 Miệng vote: `{result.mouth_votes_for_occluded}/4`  "
-                f"hist=`{result.mouth_hist_corr:.2f}` "
-                f"skin=`{result.mouth_skin_ratio:.2f}` "
-                f"edge=`{result.mouth_edge_density:.3f}` "
-                f"lap=`{result.mouth_lap_var:.0f}`"
+        if trigger == TRIGGER_NO_PERSON:
+            caption = (
+                f"⚠️ *KHÔNG THẤY AI TRONG KHUNG*\n\n"
+                f"⏰ Thời gian: `{ts}`\n"
+                f"⏱ Đã mất người: `{elapsed:.1f} giây`\n\n"
+                f"👉 Kiểm tra xem bé còn trong khung camera không "
+                f"(hoặc camera bị lệch/che)."
             )
         else:
-            reason_block = "Phát hiện che mũi/miệng"
-
-        caption = (
-            f"🚨 *CẢNH BÁO CHE MŨI/MIỆNG!*\n\n"
-            f"⏰ Thời gian: `{ts}`\n"
-            f"⏱ Bị che: `{elapsed:.1f} giây`\n\n"
-            f"{reason_block}\n\n"
-            f"⚠️ Mũi/miệng bị che quá {OCCLUSION_THRESHOLD_SEC}s!\n"
-            f"👉 *Kiểm tra trẻ ngay lập tức!*"
-        )
+            if result is not None:
+                detail = (
+                    f"👃 Mũi: `{result.nose_votes_for_occluded}/2`  "
+                    f"hist=`{result.nose_hist_corr:.2f}` skin=`{result.nose_skin_ratio:.2f}`\n"
+                    f"👄 Miệng: `{result.mouth_votes_for_occluded}/2`  "
+                    f"hist=`{result.mouth_hist_corr:.2f}` skin=`{result.mouth_skin_ratio:.2f}`"
+                )
+            else:
+                detail = "Phát hiện vùng mũi/miệng bị che."
+            caption = (
+                f"🚨 *MŨI/MIỆNG CỦA BÉ ĐANG BỊ CHE!*\n\n"
+                f"⏰ Thời gian: `{ts}`\n"
+                f"⏱ Bị che: `{elapsed:.1f} giây`\n\n"
+                f"{detail}\n\n"
+                f"👉 *Kiểm tra bé ngay!*"
+            )
 
         # Bot MỚI cho mỗi lần gửi: _dispatch_alert chạy mỗi alert trong 1
         # thread + event loop riêng (asyncio.run). python-telegram-bot v20+
@@ -509,8 +495,8 @@ class BabyMonitorV5:
         threading.Thread(target=_run, daemon=True).start()
 
     def _dispatch_alert(self, frame, elapsed, result, trigger, save_image=True):
-        status = ("FULLY_COVERED" if trigger == TRIGGER_FACE_LOST
-                  else "POSSIBLE_OCCLUSION")
+        status = ("NO_PERSON" if trigger == TRIGGER_NO_PERSON
+                  else "FACE_COVERED")
         snap = frame.copy()
         # Chỉ lưu ảnh+json cho alert đầu của event; re-alert chỉ gửi Telegram.
         if save_image:
@@ -614,17 +600,26 @@ class BabyMonitorV5:
         ts = datetime.now().strftime("%H:%M:%S")
         prefix = "🔁" if state_changed else "  "
 
+        def _countdown(threshold):
+            last_alert_at = self.fsm.last_alert_at
+            if last_alert_at is None:
+                rem = max(0.0, threshold - elapsed)
+                return f"còn {rem:.1f}s nữa sẽ thông báo"
+            next_rem = max(0.0, threshold - (now - last_alert_at))
+            return f"đã thông báo, nhắc lại sau {next_rem:.1f}s nếu vẫn còn"
+
         if state == STATE_CALIBRATING:
             line = (f"{prefix} [{ts}] 🟡 ĐANG HIỆU CHỈNH baseline — "
                     f"giữ nguyên mặt trẻ, còn {calib_remaining:.1f}s")
 
-        elif state == STATE_NO_FACE:
+        elif state == STATE_NO_PERSON:
             yolo_note = ""
             if person_seen is True:
-                yolo_note = " | YOLO: vẫn thấy người trong khung"
+                yolo_note = " | YOLO: vẫn thấy người"
             elif person_seen is False:
-                yolo_note = " | YOLO: không có người (trẻ rời khung)"
-            line = f"{prefix} [{ts}] ⚪ KHÔNG THẤY MẶT TRẺ{yolo_note}"
+                yolo_note = " | YOLO: không thấy ai"
+            line = (f"{prefix} [{ts}] ⚪ KHÔNG THẤY AI TRONG KHUNG — "
+                    f"đã {elapsed:.1f}s{yolo_note}, {_countdown(NO_PERSON_SEC)}")
 
         elif state == STATE_SAFE:
             extra = ""
@@ -632,40 +627,18 @@ class BabyMonitorV5:
                 nv = check_result.nose_votes_for_occluded
                 mv = check_result.mouth_votes_for_occluded
                 if nv >= 1 or mv >= 1:
-                    extra = (f" | ⚠ dấu hiệu nhẹ: mũi {nv}/4, miệng {mv}/4 "
-                             f"(chưa đủ để cảnh báo)")
+                    extra = (f" | ⚠ dấu hiệu nhẹ: mũi {nv}/2, miệng {mv}/2 "
+                             f"(chưa đủ để báo)")
             line = (f"{prefix} [{ts}] 🟢 BÌNH THƯỜNG — Mũi/miệng nhìn rõ, "
                     f"KHÔNG bị che{extra}")
 
-        elif state == STATE_ALERT:
-            # Tính countdown đúng với reality của state_machine:
-            #   - Chưa đủ ngưỡng (elapsed < threshold) → countdown tới alert đầu
-            #   - Đã alert lần đầu → countdown tới lần re-alert tiếp theo
-            #     (mỗi threshold_sec lặp 1 lần khi còn bị che)
-            last_alert_at = self.fsm.last_alert_at
-            if last_alert_at is None:
-                rem = max(0.0, OCCLUSION_THRESHOLD_SEC - elapsed)
-                countdown_txt = f"còn {rem:.1f}s nữa sẽ gửi cảnh báo Telegram"
-            else:
-                next_rem = max(
-                    0.0,
-                    OCCLUSION_THRESHOLD_SEC - (now - last_alert_at),
-                )
-                countdown_txt = (
-                    f"đã gửi cảnh báo, gửi lại sau {next_rem:.1f}s "
-                    f"nếu vẫn còn bị che"
-                )
-            if trigger == TRIGGER_FACE_LOST:
-                line = (f"{prefix} [{ts}] 🔴 MẤT MẶT — NGHI BỊ PHỦ KÍN "
-                        f"MŨI/MIỆNG | đã {elapsed:.1f}s, "
-                        f"{countdown_txt}")
-            else:
-                votes_txt = ""
-                if check_result is not None:
-                    votes_txt = (f" | mũi {check_result.nose_votes_for_occluded}/4, "
-                                 f"miệng {check_result.mouth_votes_for_occluded}/4")
-                line = (f"{prefix} [{ts}] 🔴 ĐANG BỊ CHE MŨI/MIỆNG — "
-                        f"đã {elapsed:.1f}s{votes_txt}, {countdown_txt}")
+        elif state == STATE_COVERED:
+            votes_txt = ""
+            if check_result is not None:
+                votes_txt = (f" | mũi {check_result.nose_votes_for_occluded}/2, "
+                             f"miệng {check_result.mouth_votes_for_occluded}/2")
+            line = (f"{prefix} [{ts}] 🔴 ĐANG BỊ CHE MŨI/MIỆNG — "
+                    f"đã {elapsed:.1f}s{votes_txt}, {_countdown(OCCLUSION_THRESHOLD_SEC)}")
         else:
             line = f"{prefix} [{ts}] (state lạ: {state})"
 
@@ -683,8 +656,9 @@ class BabyMonitorV5:
         self.smoother.reset()
         self.scene.reset()              # xây lại baseline độ nét
         self.calib_cond_warner.reset()  # quên cảnh báo điều kiện hiệu chỉnh
-        self.fsm._reset()   # noqa
-        self.fsm.last_face_seen = None
+        self.fsm._reset_covered()
+        self.fsm._reset_absent()
+        self._last_present_t = None
         self._safe_streak_start = None
         self._recal_request.clear()
         print("🔄 Đã reset — sẽ calibrate lại khi thấy mặt.\n")
@@ -708,10 +682,10 @@ class BabyMonitorV5:
             cv2.rectangle(frame, (nx-half, ny-half), (nx+half, ny+half), n_color, 2)
             cv2.rectangle(frame, (mx-half, my-half), (mx+half, my+half), m_color, 2)
             if result:
-                cv2.putText(frame, f"N:{result.nose_votes_for_occluded}/4",
+                cv2.putText(frame, f"N:{result.nose_votes_for_occluded}/2",
                             (nx-half, ny-half-6), cv2.FONT_HERSHEY_SIMPLEX,
                             0.5, n_color, 1)
-                cv2.putText(frame, f"M:{result.mouth_votes_for_occluded}/4",
+                cv2.putText(frame, f"M:{result.mouth_votes_for_occluded}/2",
                             (mx-half, my-half-6), cv2.FONT_HERSHEY_SIMPLEX,
                             0.5, m_color, 1)
 
@@ -722,8 +696,8 @@ class BabyMonitorV5:
         )
         if result is not None:
             debug = [
-                f"NOSE  hist={result.nose_hist_corr:.2f}  skin={result.nose_skin_ratio:.2f}  edge={result.nose_edge_density:.3f}  lap={result.nose_lap_var:.0f}  V={result.nose_votes_for_occluded}/4",
-                f"MOUTH hist={result.mouth_hist_corr:.2f}  skin={result.mouth_skin_ratio:.2f}  edge={result.mouth_edge_density:.3f}  lap={result.mouth_lap_var:.0f}  V={result.mouth_votes_for_occluded}/4",
+                f"NOSE  hist={result.nose_hist_corr:.2f}  skin={result.nose_skin_ratio:.2f}  V={result.nose_votes_for_occluded}/2",
+                f"MOUTH hist={result.mouth_hist_corr:.2f}  skin={result.mouth_skin_ratio:.2f}  V={result.mouth_votes_for_occluded}/2",
                 f"Quality:{self.detector.calibration_quality:.2f}  {person_label}  (R=recal)",
             ]
         else:
@@ -736,40 +710,37 @@ class BabyMonitorV5:
             cv2.putText(frame, line, (10, 50 + i * 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 200, 255), 1)
 
-        if state == STATE_ALERT:
+        is_alert_state = state in (STATE_COVERED, STATE_NO_PERSON)
+        if is_alert_state:
             cv2.rectangle(frame, (0,0), (w-1,h-1), (0,0,220), 6)
 
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, h-65), (w, h), (15,15,15), -1)
         frame = cv2.addWeighted(overlay, 0.75, frame, 0.25, 0)
 
+        def _tail(threshold):
+            last_alert_at = self.fsm.last_alert_at
+            if last_alert_at is None:
+                rem = max(0, threshold - elapsed)
+                return f"Con lai: {rem:.1f}s"
+            next_rem = max(0.0, threshold - (time.monotonic() - last_alert_at))
+            return f"Da gui | Gui lai sau: {next_rem:.1f}s"
+
         if state == STATE_CALIBRATING:
             msg   = f"Calibration... Giu nguyen mat tre {calib_remaining:.1f}s"
             color = (0, 200, 255)
             progress = 1.0 - (calib_remaining / CALIBRATION_SEC)
             cv2.rectangle(frame, (0, h-5), (int(w*progress), h), (0,200,255), -1)
-        elif state == STATE_NO_FACE:
-            msg   = "Khong phat hien khuon mat"
-            color = (100, 100, 100)
-        elif state == STATE_ALERT:
-            last_alert_at = self.fsm.last_alert_at
-            if last_alert_at is None:
-                rem = max(0, OCCLUSION_THRESHOLD_SEC - elapsed)
-                tail = f"Con lai: {rem:.1f}s"
-            else:
-                next_rem = max(
-                    0.0,
-                    OCCLUSION_THRESHOLD_SEC - (time.monotonic() - last_alert_at),
-                )
-                tail = f"Da gui | Gui lai sau: {next_rem:.1f}s"
-            if trigger == TRIGGER_FACE_LOST:
-                msg = f"MAT MAT - NGHI BI PHU KIN {elapsed:.1f}s | {tail}"
-            else:
-                msg = f"MUI/MIENG BI CHE {elapsed:.1f}s | {tail}"
+        elif state == STATE_NO_PERSON:
+            msg   = f"KHONG THAY AI {elapsed:.1f}s | {_tail(NO_PERSON_SEC)}"
+            color = (0, 140, 255)
+            cv2.putText(frame, ">>> KHONG THAY AI TRONG KHUNG <<<",
+                        (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0,140,255), 2)
+        elif state == STATE_COVERED:
+            msg = f"MUI/MIENG BI CHE {elapsed:.1f}s | {_tail(OCCLUSION_THRESHOLD_SEC)}"
             color = (0, 80, 255)
             cv2.putText(frame, ">>> CANH BAO CHE MUI/MIENG <<<",
-                        (10, h-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0,60,255), 2)
+                        (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0,60,255), 2)
         else:
             quality_warn = ""
             if self.detector.is_ready and self.detector.calibration_quality < MIN_QUALITY_WARN:
@@ -777,7 +748,7 @@ class BabyMonitorV5:
             msg   = "Binh thuong - Mui/mieng dang nhin thay" + quality_warn
             color = (0, 220, 0)
 
-        cv2.putText(frame, msg, (10, h-35 if state == STATE_ALERT else h-25),
+        cv2.putText(frame, msg, (10, h-35 if is_alert_state else h-25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
         ts = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
@@ -786,8 +757,8 @@ class BabyMonitorV5:
         dot_color = {
             STATE_CALIBRATING: (0,200,255),
             STATE_SAFE:        (0,255,0),
-            STATE_ALERT:       (0,0,255),
-            STATE_NO_FACE:     (128,128,128),
+            STATE_COVERED:     (0,0,255),
+            STATE_NO_PERSON:   (0,140,255),
         }.get(state, (128,128,128))
         cv2.circle(frame, (w-20, 20), 10, dot_color, -1)
         return frame
@@ -809,8 +780,7 @@ class BabyMonitorV5:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS,          CAMERA_FPS)
         cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-        # Autofocus ON mặc định — tắt nó là thủ phạm chính gây false alert khi
-        # đối tượng đổi khoảng cách (ảnh mờ → edge/lap_var ~0 → tưởng bị che).
+        # Autofocus ON mặc định — giữ mặt nét để MediaPipe track ổn định.
         cap.set(cv2.CAP_PROP_AUTOFOCUS,    1 if CAMERA_AUTOFOCUS else 0)
 
         actual_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -818,15 +788,13 @@ class BabyMonitorV5:
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
 
         print("🟢 Baby Monitor V5")
-        print(f"   Detection mode   : {DETECTION_MODE.upper()}")
-        if DETECTION_MODE == "strict":
-            print(f"   → Strict mode: KHÔNG dùng multi-signal voting.")
-            print(f"   → MediaPipe confidence cao ({MP_DETECTION_CONFIDENCE}) — face_lost trigger handle alert")
+        print(f"   Phát hiện        : CHE mũi/miệng (skin+histogram) + MẤT NGƯỜI")
         print(f"   Camera           : {src} → {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
         print(f"   Autofocus        : {'BẬT' if CAMERA_AUTOFOCUS else 'TẮT'} "
               f"(CAMERA_AUTOFOCUS để đổi)")
         print(f"   Calibration      : {CALIBRATION_SEC}s")
-        print(f"   Cảnh báo sau     : {OCCLUSION_THRESHOLD_SEC}s")
+        print(f"   Báo che sau      : {OCCLUSION_THRESHOLD_SEC}s")
+        print(f"   Báo mất người sau: {NO_PERSON_SEC}s (giữ presence {PRESENCE_HOLD_SEC:.1f}s)")
         print(f"   Auto-recal       : sau {AUTO_RECAL_AFTER_SEC}s safe liên tục"
               if AUTO_RECAL_AFTER_SEC > 0 else "   Auto-recal       : tắt")
         print(f"   Events lưu tại   : {EVENTS_DIR}")
@@ -844,10 +812,7 @@ class BabyMonitorV5:
         print("\n⏳ Đang load MediaPipe (lần đầu có thể mất 5-10s)...")
 
         calib_start = None
-        # Strict mode không cần calibration (không dùng multi-signal)
-        calib_done  = (DETECTION_MODE == "strict")
-        if calib_done:
-            print("ℹ️  STRICT mode — bỏ qua calibration phase.")
+        calib_done  = False
         fail_count  = 0
         MAX_FAILS   = 60
 
@@ -862,9 +827,9 @@ class BabyMonitorV5:
 
                 # Thông báo khởi động về Telegram (yêu cầu đưa mặt vào khung).
                 if STARTUP_NOTIFY:
-                    if calib_done:   # strict mode — không cần hiệu chỉnh
+                    if calib_done:
                         self._calib_done_notified = True
-                        self._notify_text("🟢 *Baby Monitor đã khởi động* (chế độ strict) — đang giám sát.")
+                        self._notify_text("🟢 *Baby Monitor đã khởi động* — đang giám sát.")
                     else:
                         self._notify_text(
                             "🟢 *Baby Monitor đã khởi động.*\n"
@@ -902,13 +867,16 @@ class BabyMonitorV5:
                     res   = face_mesh.process(rgb)
                     face_present = bool(res.multi_face_landmarks)
 
-                    state           = STATE_NO_FACE
+                    state           = STATE_NO_PERSON
                     calib_remaining = 0.0
                     elapsed         = 0.0
                     trigger         = ""
                     person_seen     = None
                     check_result: CheckResult | None = None
 
+                    # YOLO chỉ chạy khi đã hiệu chỉnh + KHÔNG thấy mặt → xác định
+                    # còn người trong khung không (phân biệt 'bé quay đầu/úp mặt'
+                    # với 'không còn ai').
                     if calib_done and not face_present:
                         person_seen = self.person_detector.has_person(frame)
 
@@ -953,67 +921,48 @@ class BabyMonitorV5:
 
                     elif not face_present and not calib_done:
                         calib_start = None
-                        state = STATE_NO_FACE
+                        state = STATE_NO_PERSON
 
                     else:
                         # === Monitoring ===
+                        # 1) CÓ NGƯỜI? mặt (MediaPipe) HOẶC YOLO thấy người;
+                        #    giữ thêm PRESENCE_HOLD_SEC sau lần thấy gần nhất để
+                        #    MediaPipe rớt track vài frame không hóa "mất người".
+                        raw_present = face_present or (person_seen is True)
+                        if raw_present:
+                            self._last_present_t = now
+                        person_present = (
+                            self._last_present_t is not None
+                            and (now - self._last_present_t) <= PRESENCE_HOLD_SEC
+                        )
+
+                        # 2) MŨI/MIỆNG BỊ CHE? chỉ đánh giá được khi thấy mặt.
                         occluded_by_detector = False
                         if face_present:
                             lms = res.multi_face_landmarks[0].landmark
-                            if DETECTION_MODE == "strict":
-                                # STRICT mode: bỏ multi-signal voting hoàn toàn.
-                                # Chỉ trust face_present từ mediapipe (high confidence).
-                                # Khi bị che → mediapipe drop face_present=False →
-                                # state machine's face_lost path alert sau 15s.
-                                check_result = None
-                                occluded_by_detector = False
-                            else:
-                                check_result = self.detector.check(
-                                    frame, lms, w, h,
-                                    prev_in_alert=self._prev_in_alert,
-                                    texture_reliable=not self.scene.is_blurry,
+                            check_result = self.detector.check(
+                                frame, lms, w, h,
+                                prev_in_alert=self._prev_in_alert,
+                            )
+                            if check_result is not None:
+                                occluded_by_detector = self.smoother.update(
+                                    check_result.occluded
                                 )
-                                if check_result is not None:
-                                    occluded_by_detector = self.smoother.update(
-                                        check_result.occluded
-                                    )
-                                    # === Quick-confirm tín hiệu cực mạnh ===
-                                    # Kịch bản che mũi+miệng đồng thời (tay/
-                                    # khẩu trang/giấy nhỏ — mắt vẫn hở):
-                                    # MediaPipe vẫn thấy mặt nhưng confidence
-                                    # dao động → smoother 10-frame có thể
-                                    # không kịp confirm trước khi mặt flicker
-                                    # mất. Bypass khi cả 2 patch đều vote
-                                    # rất rõ (≥3/4): 8/8 tín hiệu nói có che
-                                    # → không cần 10-frame consensus, set
-                                    # state ngay.
-                                    if (check_result.nose_votes_for_occluded >= 3
-                                            and check_result.mouth_votes_for_occluded >= 3):
-                                        occluded_by_detector = True
-                                        self.smoother.state = True
-                        else:
-                            # KHÔNG reset smoother khi face mất ngắn.
-                            # Lý do: khi bị che mũi+miệng, MediaPipe có thể
-                            # flicker thấy/mất → reset hard sẽ never confirm
-                            # vì mỗi lần face quay lại phải đếm 10 frame từ
-                            # đầu. Giữ state cũ → vote tích lũy được giữ lại.
-                            # Khi face mất hoàn toàn → FSM face_lost path
-                            # sẽ tự alert sau 15s, không phụ thuộc smoother.
-                            pass
+                        # Không thấy mặt → giữ nguyên smoother (không reset),
+                        # nhưng không tạo cảnh báo che mới (không thấy mũi/miệng).
 
                         result_fsm = self.fsm.step(
                             now=now,
-                            face_present=face_present,
-                            occluded_by_histogram=occluded_by_detector,
-                            person_in_frame=person_seen,
+                            person_present=person_present,
+                            covered=occluded_by_detector,
                         )
                         state   = result_fsm.state
                         elapsed = result_fsm.elapsed
                         trigger = result_fsm.trigger
 
                         if result_fsm.should_alert:
-                            # Alert đầu của event (occlusion_start mới) → lưu ảnh.
-                            # Re-alert cùng event → chỉ gửi Telegram + log.
+                            # Thông báo đầu của sự kiện → lưu ảnh. Re-alert cùng
+                            # sự kiện → chỉ gửi Telegram + log (không lưu trùng).
                             is_first_alert = (
                                 self.fsm.occlusion_start
                                 != self._last_saved_occlusion_start
@@ -1022,10 +971,10 @@ class BabyMonitorV5:
                                 self._last_saved_occlusion_start = (
                                     self.fsm.occlusion_start
                                 )
-                            kind = "CẢNH BÁO ĐẦU" if is_first_alert else "RE-ALERT"
-                            print(f"🚨 Đủ ngưỡng {OCCLUSION_THRESHOLD_SEC}s "
-                                  f"({kind}) — trigger={trigger} "
-                                  f"elapsed={elapsed:.1f}s"
+                            kind = "THÔNG BÁO ĐẦU" if is_first_alert else "NHẮC LẠI"
+                            label = ("CHE MŨI/MIỆNG" if trigger == TRIGGER_COVERED
+                                     else "MẤT NGƯỜI")
+                            print(f"🚨 [{label}] ({kind}) — elapsed={elapsed:.1f}s"
                                   + ("" if is_first_alert else " (không lưu ảnh trùng)"))
                             self._dispatch_alert(frame, elapsed,
                                                  check_result, trigger,
@@ -1042,8 +991,9 @@ class BabyMonitorV5:
                         else:
                             self._safe_streak_start = None
 
-                    # Cập nhật prev alert cho frame sau
-                    self._prev_in_alert = (state == STATE_ALERT)
+                    # Cập nhật prev alert cho frame sau (đang trong cảnh báo che
+                    # → không update baseline detector).
+                    self._prev_in_alert = (state == STATE_COVERED)
 
                     # Cảnh CLEAR → cập nhật baseline độ nét cho blur-gate.
                     if state == STATE_SAFE:

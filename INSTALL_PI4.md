@@ -318,17 +318,18 @@ TELEGRAM_CHAT_ID=<chat-id-cua-ban>
 | `TELEGRAM_CHAT_ID` | chat demo | **Đổi thành chat ID của bạn** |
 | `CAMERA_SOURCE` | `0` | index/`/dev/video0`/`rtsp://...` |
 | `CAMERA_WIDTH` / `HEIGHT` / `FPS` | **640 / 480 / 15** | Camera đặt xa → thử 800×600. Đừng lên 720p (Pi 4 tụt FPS) |
-| `YOLO_EVERY` | **`10`** | YOLO chạy mỗi N frame (chỉ dùng khi mất mặt → giãn không hại độ nhạy) |
+| `YOLO_EVERY` | **`10`** | YOLO chạy mỗi N frame (phân biệt "bé úp mặt/quay đầu — còn người" vs "không còn ai"; giãn không hại độ nhạy) |
 | `HEADLESS` | `1` | `1`=không mở cửa sổ (Pi chạy không màn hình); `0` khi dev có HDMI |
-| `DETECTION_MODE` | `multi_signal` | hoặc `strict` (safety-first, bỏ multi-signal, tiết kiệm 6–12ms/frame) |
-| `OCCLUSION_THRESHOLD_SEC` | `15` | Số giây bị che liên tục → alert |
+| `OCCLUSION_THRESHOLD_SEC` | `15` | Số giây mũi/miệng bị che liên tục → báo "Che mũi/miệng" |
+| `NO_PERSON_SEC` | `15` | Số giây không thấy ai trong khung liên tục → báo "Mất người" |
+| `PRESENCE_HOLD_SEC` | `2.0` | Giữ trạng thái "có người" thêm N giây sau lần thấy mặt/người gần nhất → MediaPipe rớt track vài frame trên Pi 4 không bị hiểu thành "mất người" |
 | `CALIBRATION_SEC` | `5` | Thời gian calibrate baseline lúc khởi động |
 | `CONFIRM_FRAMES` | `10` | Tăng (15–20) → ổn định hơn, response chậm hơn chút |
 | `SMOOTHER_MAX_MISS` | `3` | Tăng `4` nếu landmark nhảy nhiều |
 | `AUTO_RECAL_AFTER_SEC` | `1800` | Tự recalib sau 30 phút safe liên tục (0=tắt) |
-| `MP_DETECTION_CONFIDENCE` | `0.6` | MediaPipe min detection conf (chỉ `multi_signal`) |
+| `MP_DETECTION_CONFIDENCE` | `0.6` | MediaPipe min detection conf |
 | `MP_TRACKING_CONFIDENCE` | `0.6` | MediaPipe min tracking conf |
-| `BLUR_DROP_FRAC` | `0.45` | Blur-gate: độ nét < frac×baseline → bỏ phiếu edge/lap (chống false alert do mờ) |
+| `BLUR_DROP_FRAC` | `0.45` | Blur-gate: độ nét cả khung < frac×baseline → coi đang mờ → bỏ qua frame đó để khỏi báo nhầm "che" do ảnh mờ |
 | `HEALTH_MIN_FPS` | `3.0` | Watchdog: FPS dưới mức này (kéo dài) → cảnh báo suy giảm |
 | `HEALTH_DARK_LUMA` | `25` | Watchdog: độ sáng TB dưới mức này → cảnh báo "quá tối" |
 | `HEALTH_DEGRADE_SEC` | `20` | Sự cố kéo dài ≥ N giây mới cảnh báo (chống spam) |
@@ -350,10 +351,10 @@ Chạy theo thứ tự, mỗi bước phải pass.
 cd ~/baby-ai-alert
 source venv/bin/activate
 
-python tests/test_state_machine.py        # Mong đợi: 🎉 14/14 test PASS
-python tests/test_occlusion_detector.py    # Mong đợi: 🎉 16/16 test PASS
-python tests/test_scene_monitor.py         # Mong đợi: 🎉 7/7 test PASS
-python tests/test_alert_policy.py          # Mong đợi: 🎉 14/14 test PASS
+python tests/test_state_machine.py        # Mong đợi: 🎉 11/11 test PASS
+python tests/test_occlusion_detector.py    # Mong đợi: 🎉 12/12 test PASS
+python tests/test_scene_monitor.py         # Mong đợi: 🎉 5/5 test PASS
+python tests/test_alert_policy.py          # Mong đợi: 🎉 13/13 test PASS
 ```
 
 ### 8.2 Scan camera
@@ -417,20 +418,25 @@ Log khởi động in dòng `Camera`. Trên Pi 4 phải thấy **640x480**:
 ```
 Nếu thấy `1280x720` → có ai đó set `CAMERA_WIDTH/HEIGHT` cao trong `.env`. Pi 4 không kham nổi 720p (FPS tụt còn ~4–6 → ảnh mờ → mũi/miệng mất chi tiết → **báo nhầm**). Hạ lại 640×480.
 
-### 9.2 Test 4 kịch bản cảnh báo
+### 9.2 Test các kịch bản cảnh báo
+
+Hệ thống chỉ có **2 thông báo**: (1) **Che mũi/miệng** và (2) **Mất người**. Trạng thái nội bộ: `SAFE` / `COVERED` / `NO_PERSON`.
 
 | # | Kịch bản | Kỳ vọng |
 |---|---|---|
-| 1 | **Mặt sạch ngồi yên 30s** | votes 0/4 hoặc 1/4. KHÔNG alert. |
-| 2 | **Tay che mũi/miệng 15s+** | votes 2–3/4 (`lap` giảm rõ). Sau 15s → Telegram alert `MUI/MIENG BI CHE` |
-| 3 | **Chăn phủ kín mặt 15s+** | votes 4/4 ngay. Sau 15s → alert (hoặc `Mất hoàn toàn khuôn mặt`) |
-| 4a | **Chưa đặt trẻ vào (khung trống) + YOLO không thấy người** | state `NO_FACE`, KHÔNG gửi tin |
-| 4b | **Rời khung NGẮN (<15s) rồi quay lại** | Chưa đủ ngưỡng → KHÔNG gửi tin, về lại `SAFE` |
-| 4c | **Đã thấy mặt rồi rời khung ≥15s** (kể cả YOLO không thấy người) | ⚠️ **VẪN gửi** `Mất hoàn toàn khuôn mặt` — chủ đích **safety-first** (xem ghi chú dưới) |
+| 1 | **Mặt sạch ngồi yên 30s** | `skin` cao, state `SAFE`. KHÔNG alert. |
+| 2 | **Tay che mũi/miệng 15s+** | `skin` tụt mạnh (mất màu da) → state `COVERED`. Sau 15s → Telegram `🚨 MŨI/MIỆNG CỦA BÉ ĐANG BỊ CHE!` |
+| 3 | **Chăn/khăn che mũi/miệng 15s+** | `skin` tụt ngay (vật che không phải màu da) → `COVERED`. Sau 15s → cùng alert che mũi/miệng |
+| 4a | **Chưa đặt trẻ vào (khung trống) + YOLO không thấy người** | state `NO_PERSON`, đếm tới `NO_PERSON_SEC` |
+| 4b | **Rời khung NGẮN (<15s) rồi quay lại** | Nhờ `PRESENCE_HOLD_SEC` + chưa đủ `NO_PERSON_SEC` → KHÔNG gửi tin, về lại `SAFE` |
+| 4c | **Không thấy ai trong khung ≥15s** | state `NO_PERSON`. Sau `NO_PERSON_SEC` → Telegram `⚠️ KHÔNG THẤY AI TRONG KHUNG` |
+| 5 | **Bé úp mặt / quay đầu (mất mặt nhưng YOLO còn thấy người)** | KHÔNG báo "mất người" (vẫn còn người trong khung); cũng không tạo cảnh báo che mới vì không đọc được mũi/miệng |
 
-> ⚠️ **Quan trọng — thiết kế safety-first:** một khi đã thấy mặt trẻ rồi mặt **biến mất**, hệ thống coi đó là **nghi bị phủ kín** và đếm tới 15s rồi báo, **bất kể YOLO nói gì**. Lý do: camera đặt **top-down** xuống cũi → YOLO (train trên người đứng) hay **sót** trẻ nằm bị chăn phủ → nếu tin "YOLO không thấy người = rời khung" sẽ **bỏ lọt ca bị che thật**. Hệ thống chấp nhận **báo nhầm khi cha mẹ bế trẻ đi** để TUYỆT ĐỐI không miss. YOLO chỉ dùng để: (a) **bắt đầu đếm** khi thấy người mà không thấy mặt (chưa từng track mặt), và (b) **im lặng** khi khung trống chưa từng thấy mặt (4a). → Khi demo "rời khung không báo", hãy quay lại **trước 15s** (4b).
+> ℹ️ **"Có người" = MediaPipe thấy mặt HOẶC YOLO thấy người**, và còn được **giữ thêm `PRESENCE_HOLD_SEC`** (mặc định 2s) sau lần thấy gần nhất. Nhờ vậy MediaPipe rớt track vài frame trên Pi 4 không bị hiểu nhầm thành "mất người". YOLO ở đây dùng để **phân biệt "bé úp mặt/quay đầu — còn người trong khung" với "không còn ai"**: nếu YOLO vẫn thấy người thì không báo "mất người" dù MediaPipe tạm mất mặt.
+>
+> "Che mũi/miệng" được quyết định **chỉ bằng skin-ratio drop** (vùng mũi/miệng mất màu da → có vật che). Histogram chỉ được tính để **log/hiển thị**, KHÔNG dùng để quyết định.
 
-Mỗi event lưu `events/face_covered_<timestamp>.jpg` + `.json` (kèm 4 signal values) ở lần cảnh báo ĐẦU. Khi vẫn còn che → re-alert Telegram mỗi 15s (kèm ảnh mới) nhưng KHÔNG ghi thêm file trùng (tránh phình đĩa).
+Mỗi event lưu snapshot + `.json` ở lần cảnh báo ĐẦU: `events/face_covered_<timestamp>.jpg`/`.json` cho trường hợp che, `events/no_person_<timestamp>.jpg`/`.json` cho trường hợp mất người. Khi vẫn còn che / vẫn mất người → re-alert Telegram định kỳ (kèm ảnh mới) nhưng KHÔNG ghi thêm file trùng (tránh phình đĩa).
 
 ### 9.3 Recalibration
 - **GUI mode** (có HDMI, `HEADLESS=0`): nhấn phím `R`.
@@ -498,9 +504,9 @@ Nếu [§8.4](#84-benchmark-pipeline-đo-đúng-cấu-hình-production-pi-4) cho
    CAMERA_WIDTH=480
    CAMERA_HEIGHT=360
    ```
-2. **Giãn YOLO**: `YOLO_EVERY=15` (YOLO chỉ phân biệt "rời khung" vs "bị phủ", giãn không hại độ nhạy che).
-3. **Đổi sang `strict` mode**: `DETECTION_MODE=strict` — bỏ tính multi-signal, tiết kiệm 6–12ms/frame (đánh đổi: nhiều false positive hơn, nhưng safety-first).
-4. **Tăng `CONFIRM_FRAMES`** nếu votes dao động vì FPS thấp (ổn định hơn, response chậm hơn chút).
+2. **Giãn YOLO**: `YOLO_EVERY=15` (YOLO chỉ phân biệt "bé úp mặt/quay đầu — còn người" vs "không còn ai", giãn không hại độ nhạy che).
+3. **Nới `PRESENCE_HOLD_SEC`**: nếu FPS thấp làm MediaPipe rớt track nhiều và thỉnh thoảng báo nhầm "mất người", tăng `PRESENCE_HOLD_SEC` (vd `3`–`4`).
+4. **Tăng `CONFIRM_FRAMES`** nếu trạng thái che dao động vì FPS thấp (ổn định hơn, response chậm hơn chút).
 
 ### 11.1 Kiểm tra thermal throttle (rất quan trọng trên Pi 4)
 ```bash
@@ -523,7 +529,7 @@ arm_freq=1900
 
 Ba lớp logic nâng chất lượng/độ an toàn, đều rẻ CPU (~5ms/frame, dùng chung 1 ảnh xám downscale trong [src/scene_monitor.py](src/scene_monitor.py)):
 
-1. **Blur-gate (BẬT sẵn)** — khi CẢ khung đột ngột mờ (autofocus hunting / motion blur ở FPS thấp), `edge`/`lap` tụt về 0 không phải do bị che → detector **bỏ 2 phiếu texture** vòng đó, chỉ tin hist+skin. Diệt đúng lớp false-positive đã gặp. Vật/tay che thật chỉ làm mờ vùng mặt (nền vẫn nét) → độ nét toàn cục không sụt → gate **không** kích → vẫn phát hiện che bình thường. Chỉnh `BLUR_DROP_FRAC`.
+1. **Blur-gate (BẬT sẵn)** — khi CẢ khung đột ngột mờ (autofocus hunting / motion blur ở FPS thấp), độ nét toàn cục sụt không phải do bị che → hệ thống coi frame đó **không đáng tin** và bỏ qua, tránh báo nhầm "che". Vật/tay che thật chỉ làm mờ vùng mặt (nền vẫn nét) → độ nét toàn cục không sụt → gate **không** kích → vẫn phát hiện che bình thường. Chỉnh `BLUR_DROP_FRAC`.
 
 2. **Watchdog + heartbeat (BẬT sẵn, trừ heartbeat)** — tự giám sát để **không fail âm thầm**: camera ĐƠ (frame trùng) / phòng QUÁ TỐI / FPS quá thấp kéo dài ≥ `HEALTH_DEGRADE_SEC` → gửi `⚠️ GIÁM SÁT SUY GIẢM`, và báo `✅ Đã khôi phục` khi hết. Bật heartbeat định kỳ ("vẫn đang canh") bằng `HEARTBEAT_SEC` (vd 6h).
 
@@ -626,16 +632,15 @@ Guard tầng 2/3 fire → `bash scripts/fix_env.sh`.
 ### Biểu tượng tia chớp ⚡ / undervoltage / USB chập chờn
 Nguồn yếu — dùng **adapter USB-C 5V/3A chính hãng**, không dùng cáp sạc điện thoại.
 
-### Tay che mũi/miệng NHƯNG không alert (false negative)
-- Xem debug bar dòng `MOUTH`: khi tay che, `lap=` phải < 50 → vote. Nếu vẫn > 50: tăng `LAPVAR_ABSOLUTE_FLOOR` trong [src/occlusion_detector.py](src/occlusion_detector.py) (vd 80).
-- `edge` của tay > 0.020 → tăng `EDGE_ABSOLUTE_FLOOR` (vd 0.030).
-- votes dao động → giảm `CONFIRM_FRAMES` (7–8), tăng `SMOOTHER_MAX_MISS` (4–5).
+### Tay/vật che mũi/miệng NHƯNG không alert (false negative)
+- Xem debug bar dòng `MOUTH`/`NOSE`: khi bị che, `skin=` phải tụt mạnh so với mặt sạch → vote che. Nếu `skin` vẫn cao (vật che ngả màu da): giảm `SKIN_DROP_FRAC` trong [src/occlusion_detector.py](src/occlusion_detector.py) (vd 0.40) để skin chỉ cần tụt ít hơn là vote.
+- Trạng thái che dao động → giảm `CONFIRM_FRAMES` (7–8), tăng `SMOOTHER_MAX_MISS` (4–5).
 - Recalibrate (`R` hoặc `kill -USR1`).
 
 ### Mặt sạch nhưng vẫn alert (false positive)
-- **NGUYÊN NHÂN SỐ 1 TRÊN PI 4: camera đang chạy ở 720p.** Kiểm tra log khởi động có in `640x480` không ([§9.1](#91-chạy-chương-trình)). Nếu in `1280x720` → có ai set `CAMERA_WIDTH/HEIGHT` cao trong `.env`/env → Pi 4 tụt FPS → ảnh mờ → `edge≈0`/`lap≈0` ở mũi/miệng → báo nhầm. Fix: bỏ override, để default 640×480.
+- **NGUYÊN NHÂN SỐ 1 TRÊN PI 4: camera đang chạy ở 720p.** Kiểm tra log khởi động có in `640x480` không ([§9.1](#91-chạy-chương-trình)). Nếu in `1280x720` → có ai set `CAMERA_WIDTH/HEIGHT` cao trong `.env`/env → Pi 4 tụt FPS → ảnh mờ → màu da vùng mũi/miệng nhiễu → `skin` dao động → báo nhầm. Fix: bỏ override, để default 640×480.
 - `quality` < 0.5 → calibration kém → recalibrate trong điều kiện ổn định.
-- Tăng `CONFIRM_FRAMES` (15–20) để vài frame nhòe không kịp confirm. Nếu riêng cái mũi hay vote (`edge=0.000 lap` thấp dù da rõ), nới `EDGE_DROP_FRAC`/`LAPVAR_DROP_FRAC` trong [src/occlusion_detector.py](src/occlusion_detector.py) (vd 0.55 / 0.70) để texture phải tụt nhiều hơn mới vote.
+- Tăng `CONFIRM_FRAMES` (15–20) để vài frame nhòe không kịp confirm. Nếu mặt sạch vẫn hay bị vote che, nới `SKIN_DROP_FRAC` trong [src/occlusion_detector.py](src/occlusion_detector.py) (vd 0.60) để `skin` phải tụt nhiều hơn mới vote.
 
 ### `Failed to send Telegram message`
 - Không internet → `ping 8.8.8.8`. Token/chat ID sai → test curl ([§6.3](#63-test-gửi-từ-chính-pi-4)).
@@ -675,15 +680,15 @@ Raspberry Pi 4 Model B (BCM2711, 4GB/8GB RAM)
 │   ├── requirements.txt          ← deps pinned (numpy<2, opencv<4.11, torch<2.4)
 │   ├── src/
 │   │   ├── main.py               ← entrypoint, 3 guard env, signal handlers
-│   │   ├── state_machine.py      ← FSM phát hiện che mũi/miệng
-│   │   └── occlusion_detector.py ← Multi-signal voting (hist+skin+edge+lap_var)
+│   │   ├── state_machine.py      ← FSM 3 trạng thái: SAFE / COVERED / NO_PERSON
+│   │   └── occlusion_detector.py ← Phát hiện che bằng skin-ratio drop (hist chỉ để log)
 │   ├── scripts/
 │   │   ├── install_pi4.sh       ← One-shot install cho Pi 4 (ARM64 CPU-only)
 │   │   ├── fix_env.sh            ← Fix opencv/numpy/nvidia variants
 │   │   ├── setup_autostart.sh    ← Cài systemd autostart (tự dò user/path)
 │   │   ├── test_webcam.py        ← Verify camera + FPS
 │   │   └── benchmark.py          ← Đo pipeline
-│   ├── tests/                    ← 11 + 15 test
+│   ├── tests/                    ← unit test state machine / occlusion / scene / alert policy
 │   ├── .env                      ← token Telegram (camera/FPS đã là default code)
 │   ├── .env.example             ← mẫu .env (chủ yếu cho token)
 │   ├── run.sh                    ← wrapper nạp .env rồi chạy

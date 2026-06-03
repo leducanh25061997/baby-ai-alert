@@ -1,4 +1,4 @@
-"""Test state machine. Không có dependency ngoài stdlib.
+"""Test state machine ĐƠN GIẢN (che / mất người). Thuần stdlib.
 
 Chạy: python tests/test_state_machine.py
 """
@@ -10,355 +10,163 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from state_machine import (
     OcclusionStateMachine,
-    STATE_ALERT, STATE_SAFE, STATE_NO_FACE,
-    TRIGGER_HISTOGRAM, TRIGGER_FACE_LOST,
+    STATE_SAFE, STATE_COVERED, STATE_NO_PERSON,
+    TRIGGER_COVERED, TRIGGER_NO_PERSON,
 )
 
 
-# Helper: chạy nhiều frame liên tiếp và trả về kết quả cuối
-def run_seq(fsm, sequence):
-    last = None
-    for kwargs in sequence:
-        last = fsm.step(**kwargs)
-    return last
-
-
 def test_safe_flow():
-    """Mặt thấy bình thường → SAFE, không alert."""
+    """Có người + không che → SAFE, không báo."""
     fsm = OcclusionStateMachine()
-    r = fsm.step(now=10.0, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_SAFE, f"got {r.state}"
+    r = fsm.step(now=10.0, person_present=True, covered=False)
+    assert r.state == STATE_SAFE, r.state
     assert not r.should_alert
     assert r.elapsed == 0.0
     print("✅ test_safe_flow")
 
 
-def test_histogram_alert_fires_at_threshold():
-    """Mũi/miệng bị che 15s liên tục → alert."""
+def test_covered_alert_fires_at_threshold():
+    """Mũi/miệng bị che 15s liên tục → báo."""
     fsm = OcclusionStateMachine(threshold_sec=15)
-    # t=0: bắt đầu bị che
-    r = fsm.step(now=0.0, face_present=True, occluded_by_histogram=True)
-    assert r.state == STATE_ALERT
-    assert r.trigger == TRIGGER_HISTOGRAM
-    assert not r.should_alert  # mới 0s, chưa đủ 15s
-    # t=14.9: gần đủ ngưỡng
-    r = fsm.step(now=14.9, face_present=True, occluded_by_histogram=True)
+    r = fsm.step(now=0.0, person_present=True, covered=True)
+    assert r.state == STATE_COVERED
+    assert r.trigger == TRIGGER_COVERED
     assert not r.should_alert
-    # t=15.0: đủ ngưỡng → bắn alert
-    r = fsm.step(now=15.0, face_present=True, occluded_by_histogram=True)
-    assert r.should_alert, "Phải bắn alert tại t=15s"
-    assert r.trigger == TRIGGER_HISTOGRAM
-    # t=15.1: alert đã bắn, không bắn lại
-    r = fsm.step(now=15.1, face_present=True, occluded_by_histogram=True)
-    assert not r.should_alert, "Không được bắn lại"
-    print("✅ test_histogram_alert_fires_at_threshold")
-
-
-def test_histogram_recovery_resets():
-    """Bị che rồi hết bị che → reset SAU khi safe đủ lâu (anti-flicker)."""
-    fsm = OcclusionStateMachine(threshold_sec=15, safe_recovery_sec=1.5)
-    fsm.step(now=0.0, face_present=True, occluded_by_histogram=True)
-    fsm.step(now=10.0, face_present=True, occluded_by_histogram=True)
-    # ANTI-FLICKER: 1 frame safe (0.5s) chưa đủ → vẫn ALERT, occlusion giữ
-    r = fsm.step(now=10.5, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_ALERT, "Anti-flicker: 0.5s safe chưa đủ để reset"
-    assert fsm.occlusion_start is not None
-    # Safe đủ lâu (1.5s safe streak) → reset
-    r = fsm.step(now=12.0, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_SAFE
-    assert fsm.occlusion_start is None
-    # Bị che lại từ đầu
-    r = fsm.step(now=12.5, face_present=True, occluded_by_histogram=True)
-    assert r.state == STATE_ALERT
-    assert r.elapsed < 1.0  # đếm từ 12.5
-    print("✅ test_histogram_recovery_resets")
-
-
-def test_face_lost_critical_bug_fix():
-    """KỊCH BẢN NGUY HIỂM NHẤT: mặt bị phủ kín → face_mesh không thấy mặt nữa.
-
-    Trước fix: code reset bộ đếm khi không thấy mặt → KHÔNG BAO GIỜ alert.
-    Sau fix:  state machine vẫn đếm và bắn alert đúng 15s.
-    """
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5)
-
-    # t=0: thấy mặt bình thường
-    r = fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_SAFE
-
-    # t=0.5: chăn phủ kín → face_mesh mất tracking
-    r = fsm.step(now=0.5, face_present=False, occluded_by_histogram=False)
-    assert r.state == STATE_ALERT, "Phải nghi ngờ ngay khi vừa mất mặt"
-    assert r.trigger == TRIGGER_FACE_LOST
-
-    # t=1..14: vẫn không thấy mặt, vẫn đếm
-    for t in [2.0, 5.0, 10.0, 14.9]:
-        r = fsm.step(now=t, face_present=False, occluded_by_histogram=False)
-        assert r.state == STATE_ALERT
-        assert not r.should_alert, f"Chưa đủ ngưỡng tại t={t}"
-
-    # t=15.0: đủ ngưỡng → ALERT BẮN! (chính là cái bug nghiêm trọng đã fix)
-    r = fsm.step(now=15.0, face_present=False, occluded_by_histogram=False)
-    assert r.should_alert, "FIX BUG: phải bắn alert dù không thấy mặt!"
-    assert r.trigger == TRIGGER_FACE_LOST
-    print("✅ test_face_lost_critical_bug_fix")
-
-
-def test_face_lost_briefly_then_returns_no_alert():
-    """Mặt mất 0.5s rồi quay lại bình thường — không bắn alert (chưa đủ 15s)
-    và sau khi safe đủ lâu thì reset về SAFE."""
-    fsm = OcclusionStateMachine(threshold_sec=15, safe_recovery_sec=1.5)
-    fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
-    fsm.step(now=0.5, face_present=False, occluded_by_histogram=False)
-    # Quay lại bình thường — anti-flicker chưa đủ 1.5s safe → giữ ALERT
-    r = fsm.step(now=1.0, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_ALERT
-    assert fsm.occlusion_start is not None
-    assert not r.should_alert  # chưa đủ 15s
-    # Safe đủ lâu (1.5s liên tục sau t=1.0) → reset về SAFE
-    r = fsm.step(now=2.6, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_SAFE
-    assert fsm.occlusion_start is None
+    r = fsm.step(now=14.9, person_present=True, covered=True)
     assert not r.should_alert
-    print("✅ test_face_lost_briefly_then_returns_no_alert")
+    r = fsm.step(now=15.0, person_present=True, covered=True)
+    assert r.should_alert and r.trigger == TRIGGER_COVERED
+    r = fsm.step(now=15.1, person_present=True, covered=True)
+    assert not r.should_alert, "Không bắn lại trong cùng chu kỳ"
+    print("✅ test_covered_alert_fires_at_threshold")
 
 
-def test_face_lost_keeps_realerting_past_gone_reset():
-    """AN TOÀN CỐT LÕI: mặt bị phủ kín (face_lost) → SAU khi đã bắn alert đầu,
-    KHÔNG được tự reset vì time-out, mà phải re-alert mỗi threshold_sec đến khi
-    mặt quay lại.
+def test_covered_recovery_anti_flicker():
+    """Bị che rồi hết che → reset SAU khi sạch đủ lâu (anti-flicker)."""
+    fsm = OcclusionStateMachine(threshold_sec=15, safe_recovery_sec=1.5)
+    fsm.step(now=0.0, person_present=True, covered=True)
+    fsm.step(now=10.0, person_present=True, covered=True)
+    r = fsm.step(now=10.5, person_present=True, covered=False)
+    assert r.state == STATE_COVERED, "0.5s sạch chưa đủ để reset"
+    assert fsm.covered_start is not None
+    r = fsm.step(now=12.0, person_present=True, covered=False)
+    assert r.state == STATE_SAFE
+    assert fsm.covered_start is None
+    print("✅ test_covered_recovery_anti_flicker")
 
-    Lý do: chăn/gối phủ kín → MediaPipe mất tracking + YOLO top-down trả False
-    sai → nếu reset sau gone_reset_sec thì ca bị che kín chỉ nhận 1 cảnh báo rồi
-    im lặng (gửi 1 lần rồi thôi). Phải báo liên tục đến khi parent gỡ vật che.
-    """
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5, gone_reset_sec=25)
-    fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
-    fsm.step(now=0.5, face_present=False, occluded_by_histogram=False)
 
-    # Mặt mất liên tục, KHÔNG có YOLO (person_in_frame=None) — kịch bản top-down.
+def test_covered_repeats_every_threshold():
+    """Còn bị che → báo lặp mỗi threshold_sec (4 lần trong 75s)."""
+    fsm = OcclusionStateMachine(threshold_sec=15)
     fired = []
-    t = 0.5
+    t = 0.0
     while t < 75.0:
-        r = fsm.step(now=t, face_present=False, occluded_by_histogram=False,
-                     person_in_frame=None)
+        r = fsm.step(now=t, person_present=True, covered=True)
         if r.should_alert:
             fired.append(round(t, 1))
         t += 0.1
-    # Kỳ vọng: re-alert mỗi 15s (~15, 30, 45, 60) — KHÔNG dừng lại sau gone_reset.
-    assert len(fired) == 4, (
-        f"Phải re-alert mỗi 15s khi vẫn mất mặt; thực tế {len(fired)} tại {fired}"
-    )
+    assert len(fired) == 4, f"Phải báo 4 lần; thực tế {fired}"
     for i in range(1, len(fired)):
-        gap = fired[i] - fired[i - 1]
-        assert 14.9 < gap < 15.2, f"Gap {gap:.2f}s không đúng 15s"
-    # Vẫn đang ALERT, chưa reset
-    assert fsm.occlusion_start is not None
-    print("✅ test_face_lost_keeps_realerting_past_gone_reset")
+        assert 14.9 < fired[i] - fired[i-1] < 15.2
+    print("✅ test_covered_repeats_every_threshold")
 
 
-def test_face_lost_returns_clean_then_resets():
-    """Sau khi mất mặt + alert, nếu mặt quay lại SẠCH đủ lâu → reset về SAFE
-    (parent đã gỡ vật che). Đây là đường reset hợp lệ duy nhất sau khi đã alert."""
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5,
-                                 gone_reset_sec=25, safe_recovery_sec=1.5)
-    fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
-    fsm.step(now=0.5, face_present=False, occluded_by_histogram=False)
-    # Bắn alert đầu ở ngưỡng 15s (cần đạt ngưỡng trong gone_reset window)
-    r = fsm.step(now=15.0, face_present=False, occluded_by_histogram=False)
-    assert r.should_alert
-    # Vẫn mất mặt tới 40s (đã quá gone_reset 25s) — KHÔNG reset vì đã alert
-    r = fsm.step(now=40.0, face_present=False, occluded_by_histogram=False)
-    assert r.state == STATE_ALERT
-    assert fsm.alert_sent
-    # Mặt quay lại sạch — anti-flicker 0.5s chưa đủ
-    r = fsm.step(now=40.5, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_ALERT
-    # Sạch đủ lâu (1.5s) → reset về SAFE
-    r = fsm.step(now=42.0, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_SAFE
-    assert fsm.occlusion_start is None
-    assert not fsm.alert_sent
-    print("✅ test_face_lost_returns_clean_then_resets")
-
-
-def test_yolo_no_person_in_grace_still_alerts():
-    """SAFETY-FIRST: YOLO=False trong grace KHÔNG được reset.
-
-    Lý do thực tế: camera nhìn TOP-DOWN xuống mặt trẻ nằm,
-    YOLO COCO 'person' class chủ yếu train trên người đứng/ngồi → top-down
-    view của trẻ → YOLO HAY trả False sai. Khi giấy/chăn che kín mặt:
-    MediaPipe mất tracking + YOLO trả False sai → nếu reset ngay sẽ MISS
-    alert hoàn toàn (kịch bản nguy hiểm chết người).
-
-    Vì vậy trong grace + đã nghi che → tin face_lost path, kệ YOLO.
-    """
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5)
-    fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
-    # Mất mặt + YOLO=False trong grace → VẪN ALERT (safety-first)
-    r = fsm.step(now=0.5, face_present=False, occluded_by_histogram=False,
-                 person_in_frame=False)
-    assert r.state == STATE_ALERT, "Trong grace phải đếm bất kể YOLO"
-    assert r.trigger == TRIGGER_FACE_LOST
-    # Sau grace, occlusion_start đã set → tiếp tục đếm dù YOLO=False
-    r = fsm.step(now=10.0, face_present=False, occluded_by_histogram=False,
-                 person_in_frame=False)
-    assert r.state == STATE_ALERT
-    assert not r.should_alert  # chưa đủ 15s
-    # t=15.0 → đủ ngưỡng → BẮN bất kể YOLO=False
-    r = fsm.step(now=15.0, face_present=False, occluded_by_histogram=False,
-                 person_in_frame=False)
-    assert r.should_alert, "Phải bắn alert dù YOLO=False — kịch bản giấy che mặt"
-    assert r.trigger == TRIGGER_FACE_LOST
-    print("✅ test_yolo_no_person_in_grace_still_alerts")
-
-
-def test_yolo_no_person_no_prior_face_resets():
-    """YOLO=False khi CHƯA TỪNG thấy mặt → trẻ chưa từng vào khung → reset.
-
-    Đây là case 'cha mẹ chưa đặt trẻ vào nôi' — không nên alert.
-    """
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5)
-    # Chưa từng thấy mặt + YOLO=False → reset
-    r = fsm.step(now=0.0, face_present=False, occluded_by_histogram=False,
-                 person_in_frame=False)
-    assert r.state == STATE_NO_FACE
+def test_no_person_fires_at_threshold():
+    """Không thấy ai 15s → báo 'mất người'."""
+    fsm = OcclusionStateMachine(no_person_sec=15)
+    r = fsm.step(now=0.0, person_present=False, covered=False)
+    assert r.state == STATE_NO_PERSON
+    assert r.trigger == TRIGGER_NO_PERSON
     assert not r.should_alert
-    assert fsm.occlusion_start is None
-    # Suốt 30s không ai → vẫn NO_FACE
-    r = fsm.step(now=30.0, face_present=False, occluded_by_histogram=False,
-                 person_in_frame=False)
-    assert r.state == STATE_NO_FACE
+    r = fsm.step(now=14.9, person_present=False, covered=False)
     assert not r.should_alert
-    print("✅ test_yolo_no_person_no_prior_face_resets")
+    r = fsm.step(now=15.0, person_present=False, covered=False)
+    assert r.should_alert and r.trigger == TRIGGER_NO_PERSON
+    print("✅ test_no_person_fires_at_threshold")
 
 
-def test_yolo_person_present_keeps_counting_beyond_grace():
-    """YOLO khẳng định CÓ người dù không thấy mặt → nghi bị phủ → vẫn đếm."""
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5, gone_reset_sec=25)
-
-    # Thấy mặt rồi mất từ rất sớm — mất mặt suốt thời gian dài
-    fsm.step(now=0.0, face_present=True, occluded_by_histogram=False)
-
-    # Mất mặt liên tục — nhưng YOLO khẳng định CÓ người
-    for t in [0.5, 5.0, 10.0, 14.9]:
-        r = fsm.step(now=t, face_present=False, occluded_by_histogram=False,
-                     person_in_frame=True)
-        assert r.state == STATE_ALERT, f"YOLO thấy người, phải đếm tại t={t}"
-
-    # t=15.0 — alert bắn
-    r = fsm.step(now=15.0, face_present=False, occluded_by_histogram=False,
-                 person_in_frame=True)
-    assert r.should_alert
-    print("✅ test_yolo_person_present_keeps_counting_beyond_grace")
-
-
-def test_alert_repeats_every_threshold_while_still_occluded():
-    """Khi vẫn còn bị che, alert lặp lại đúng mỗi threshold_sec, KHÔNG spam
-    mỗi frame. An toàn cho ca bị che: cảnh báo liên tục đến khi tình huống
-    được giải quyết (parent gỡ vật che mặt trẻ)."""
-    fsm = OcclusionStateMachine(threshold_sec=15)
-    fsm.step(now=0.0, face_present=True, occluded_by_histogram=True)
-    # Mỗi 0.1s gọi step → mô phỏng 30fps
-    fired_times = []
+def test_no_person_repeats():
+    """Mất người kéo dài → nhắc lại mỗi chu kỳ."""
+    fsm = OcclusionStateMachine(no_person_sec=15)
+    fired = []
     t = 0.0
-    while t < 75.0:
-        r = fsm.step(now=t, face_present=True, occluded_by_histogram=True)
+    while t < 47.0:
+        r = fsm.step(now=t, person_present=False, covered=False)
         if r.should_alert:
-            fired_times.append(t)
+            fired.append(round(t, 1))
         t += 0.1
-    # Kỳ vọng: fire tại ~15s, ~30s, ~45s, ~60s (4 lần trong 75s)
-    assert len(fired_times) == 4, (
-        f"Phải fire 4 lần (mỗi 15s); thực tế {len(fired_times)} tại {fired_times}"
-    )
-    # Khoảng giữa 2 lần fire phải xấp xỉ 15s
-    for i in range(1, len(fired_times)):
-        gap = fired_times[i] - fired_times[i-1]
-        assert 14.9 < gap < 15.2, f"Gap {gap:.2f}s không đúng 15s"
-    print("✅ test_alert_repeats_every_threshold_while_still_occluded")
+    assert len(fired) == 3, f"Phải nhắc 3 lần (~15,30,45); thực tế {fired}"
+    print("✅ test_no_person_repeats")
 
 
-def test_alert_no_spam_within_one_threshold_window():
-    """Trong 1 chu kỳ 15s, dù gọi step() mỗi frame, chỉ fire 1 lần."""
+def test_person_returns_clears_no_person():
+    """Đang đếm mất người, người quay lại → về SAFE ngay, dừng đếm."""
+    fsm = OcclusionStateMachine(no_person_sec=15)
+    fsm.step(now=0.0, person_present=False, covered=False)
+    fsm.step(now=10.0, person_present=False, covered=False)
+    r = fsm.step(now=11.0, person_present=True, covered=False)
+    assert r.state == STATE_SAFE
+    assert fsm.absent_start is None
+    print("✅ test_person_returns_clears_no_person")
+
+
+def test_lost_person_clears_covered():
+    """Đang đếm che mà người biến mất → chuyển sang đếm 'mất người', bỏ che."""
+    fsm = OcclusionStateMachine(threshold_sec=15, no_person_sec=15)
+    fsm.step(now=0.0, person_present=True, covered=True)
+    fsm.step(now=5.0, person_present=True, covered=True)
+    r = fsm.step(now=6.0, person_present=False, covered=False)
+    assert r.state == STATE_NO_PERSON
+    assert fsm.covered_start is None, "Mất người phải xóa bộ đếm che"
+    assert fsm.absent_start is not None
+    print("✅ test_lost_person_clears_covered")
+
+
+def test_covered_only_when_person_present():
+    """covered=True nhưng không có người → vẫn coi là mất người (ưu tiên presence)."""
+    fsm = OcclusionStateMachine()
+    r = fsm.step(now=0.0, person_present=False, covered=True)
+    assert r.state == STATE_NO_PERSON
+    assert r.trigger == TRIGGER_NO_PERSON
+    print("✅ test_covered_only_when_person_present")
+
+
+def test_no_alert_before_threshold_then_safe():
+    """Che ngắn <15s rồi hết → không báo, về SAFE sau khi sạch đủ lâu."""
+    fsm = OcclusionStateMachine(threshold_sec=15, safe_recovery_sec=1.5)
+    fsm.step(now=0.0, person_present=True, covered=True)
+    r = fsm.step(now=2.0, person_present=True, covered=False)
+    assert r.state == STATE_COVERED and not r.should_alert
+    r = fsm.step(now=4.0, person_present=True, covered=False)
+    assert r.state == STATE_SAFE
+    assert not r.should_alert
+    print("✅ test_no_alert_before_threshold_then_safe")
+
+
+def test_backward_compat_properties():
+    """occlusion_start / last_alert_at vẫn dùng được cho UI countdown."""
     fsm = OcclusionStateMachine(threshold_sec=15)
-    fsm.step(now=0.0, face_present=True, occluded_by_histogram=True)
-    # Bắn 1 lần ở t=15
-    r = fsm.step(now=15.0, face_present=True, occluded_by_histogram=True)
-    assert r.should_alert
-    # Từ 15.1 đến 29.9 — không bắn lại (chưa đủ chu kỳ 15s tiếp theo)
-    fired = 0
-    t = 15.1
-    while t < 29.95:
-        r = fsm.step(now=t, face_present=True, occluded_by_histogram=True)
-        if r.should_alert:
-            fired += 1
-        t += 0.1
-    assert fired == 0, f"Bắn lại {fired} lần trong cùng chu kỳ — sai!"
-    print("✅ test_alert_no_spam_within_one_threshold_window")
-
-
-def test_no_face_then_alert_then_recovery():
-    """Full flow: NO_FACE → SAFE → ALERT (face_lost) → SAFE again."""
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5,
-                                 safe_recovery_sec=1.5)
-
-    # Chưa từng thấy mặt
-    r = fsm.step(now=0.0, face_present=False, occluded_by_histogram=False)
-    assert r.state == STATE_NO_FACE
-
-    # Thấy mặt
-    r = fsm.step(now=1.0, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_SAFE
-
-    # Mất mặt
-    r = fsm.step(now=1.5, face_present=False, occluded_by_histogram=False)
-    assert r.state == STATE_ALERT
-
-    # Mặt quay lại sạch — anti-flicker: 0.5s chưa đủ
-    r = fsm.step(now=2.0, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_ALERT
-    assert not r.should_alert
-
-    # Safe đủ lâu (1.5s) → reset về SAFE
-    r = fsm.step(now=3.5, face_present=True, occluded_by_histogram=False)
-    assert r.state == STATE_SAFE
-    assert not r.should_alert
-    print("✅ test_no_face_then_alert_then_recovery")
-
-
-def test_grace_period_starts_count_from_face_lost_moment():
-    """occlusion_start phải được tính từ lúc mất mặt, không phải lúc step."""
-    fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5)
-    fsm.step(now=10.0, face_present=True, occluded_by_histogram=False)
-    # 1 giây sau mất mặt
-    fsm.step(now=11.0, face_present=False, occluded_by_histogram=False)
-    # occlusion_start phải ≈ 10.0 (lúc mặt mất), không phải 11.0
-    assert abs(fsm.occlusion_start - 10.0) < 0.01, \
-        f"occlusion_start={fsm.occlusion_start}, kỳ vọng ≈10.0"
-    # Vì vậy alert phải bắn ở t=25.0 (10.0 + 15), không phải 26.0
-    r = fsm.step(now=24.9, face_present=False, occluded_by_histogram=False)
-    assert not r.should_alert
-    r = fsm.step(now=25.0, face_present=False, occluded_by_histogram=False)
-    assert r.should_alert
-    print("✅ test_grace_period_starts_count_from_face_lost_moment")
+    fsm.step(now=0.0, person_present=True, covered=True)
+    assert abs(fsm.occlusion_start - 0.0) < 1e-9
+    assert fsm.last_alert_at is None
+    fsm.step(now=15.0, person_present=True, covered=True)
+    assert fsm.last_alert_at is not None
+    print("✅ test_backward_compat_properties")
 
 
 if __name__ == "__main__":
     tests = [
         test_safe_flow,
-        test_histogram_alert_fires_at_threshold,
-        test_histogram_recovery_resets,
-        test_face_lost_critical_bug_fix,
-        test_face_lost_briefly_then_returns_no_alert,
-        test_face_lost_keeps_realerting_past_gone_reset,
-        test_face_lost_returns_clean_then_resets,
-        test_yolo_no_person_in_grace_still_alerts,
-        test_yolo_no_person_no_prior_face_resets,
-        test_yolo_person_present_keeps_counting_beyond_grace,
-        test_alert_repeats_every_threshold_while_still_occluded,
-        test_alert_no_spam_within_one_threshold_window,
-        test_no_face_then_alert_then_recovery,
-        test_grace_period_starts_count_from_face_lost_moment,
+        test_covered_alert_fires_at_threshold,
+        test_covered_recovery_anti_flicker,
+        test_covered_repeats_every_threshold,
+        test_no_person_fires_at_threshold,
+        test_no_person_repeats,
+        test_person_returns_clears_no_person,
+        test_lost_person_clears_covered,
+        test_covered_only_when_person_present,
+        test_no_alert_before_threshold_then_safe,
+        test_backward_compat_properties,
     ]
     failed = 0
     for t in tests:

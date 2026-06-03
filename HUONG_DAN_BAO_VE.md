@@ -25,13 +25,13 @@
 
 > *Câu mở đầu khi giới thiệu với hội đồng. Học thuộc, nói trơn tru.*
 
-**"Đề tài của em là hệ thống cảnh báo che mũi/miệng ở trẻ sơ sinh bằng AI, chạy trên máy tính nhúng Raspberry Pi 4. Hệ thống dùng camera quan sát trẻ liên tục, dùng MediaPipe để xác định vị trí mũi và miệng, sau đó dùng 4 tín hiệu hình ảnh để bỏ phiếu xem mũi/miệng có bị vật lạ che hay không. Nếu bị che quá 15 giây thì gửi cảnh báo về Telegram cho cha mẹ kèm ảnh chụp tại thời điểm đó. Toàn bộ chạy CPU-only trên Raspberry Pi 4, không cần GPU, hoạt động real-time khoảng 6-8 khung hình mỗi giây ở độ phân giải 640×480."**
+**"Đề tài của em là hệ thống cảnh báo cho cha mẹ trẻ sơ sinh bằng AI, chạy trên máy tính nhúng Raspberry Pi 4. Hệ thống dùng camera quan sát trẻ liên tục, dùng MediaPipe để xác định vị trí mũi và miệng, sau đó kiểm tra xem vùng mũi/miệng có còn là màu da hay đã bị vật lạ (chăn/gối/khăn/giấy) che. Hệ thống chỉ gửi 2 loại thông báo: (1) khi mũi/miệng bị che liên tục quá 15 giây, và (2) khi không thấy ai trong khung quá 15 giây. Mỗi thông báo gửi về Telegram cho cha mẹ kèm ảnh chụp tại thời điểm đó. Toàn bộ chạy CPU-only trên Raspberry Pi 4, không cần GPU, hoạt động real-time khoảng 6-8 khung hình mỗi giây ở độ phân giải 640×480."**
 
 ### 4 điểm mạnh để khoe ngay:
 1. **Real-time trên thiết bị nhúng giá rẻ** (Raspberry Pi 4 ~1.5 triệu VND) — không cần cloud, không cần GPU
-2. **Multi-signal voting** — 4 tín hiệu bỏ phiếu chéo, không phụ thuộc 1 model AI duy nhất → robust
-3. **Có state machine + grace period** — tránh false alert khi mặt bị che trong tích tắc
-4. **Thiết kế safety-first + YOLO hỗ trợ** — khi mất mặt thì ưu tiên cảnh báo (thà báo nhầm còn hơn bỏ lọt ca bị che); YOLO giúp bắt đầu đếm khi thấy người và im lặng khi khung trống
+2. **Tín hiệu phát hiện đơn giản và bền** — quyết định "bị che" chỉ dựa vào tỷ lệ màu da (skin ratio) tụt mạnh → mặt nhìn rõ KHÔNG bao giờ bị báo nhầm
+3. **Có state machine + anti-flicker** — tránh false alert khi mặt bị che hay rớt track trong tích tắc
+4. **Có người = MediaPipe HOẶC YOLO** — giữ thêm 2 giây sau lần thấy gần nhất nên mặt nhìn rõ không bị hiểu nhầm thành "mất người"; chỉ báo "mất người" khi thật sự không còn ai trong khung
 
 ---
 
@@ -44,12 +44,12 @@ baby-ai-alert/
 │
 ├── src/                              ← "Khu vực chính" — code chạy app
 │   ├── main.py                       ← Phòng khách: tiếp nhận camera, điều phối
-│   ├── state_machine.py              ← Phòng não: quyết định khi nào alert
+│   ├── state_machine.py              ← Phòng não: quyết định khi nào báo che / mất người
 │   ├── occlusion_detector.py         ← Phòng mắt: nhìn và phân tích pixel mũi/miệng
 │   ├── scene_monitor.py              ← Phòng cảm biến: blur-gate + motion + luma
 │   └── alert_policy.py               ← Phòng đồng hồ: timing watchdog/heartbeat/nhắc hiệu chỉnh
 │
-├── tests/                            ← Kho kiểm thử (59 unit test)
+├── tests/                            ← Kho kiểm thử (52 unit test)
 │   ├── test_state_machine.py         (14 test cho FSM)
 │   ├── test_occlusion_detector.py    (16 test cho detector)
 │   ├── test_scene_monitor.py         (7 test cho blur/motion/luma)
@@ -73,12 +73,12 @@ baby-ai-alert/
 | File | Vai trò | Số dòng |
 |---|---|---|
 | **main.py** | Entry point: mở camera, gọi MediaPipe, ghép tất cả lại, gửi Telegram | ~700 |
-| **state_machine.py** | Não bộ ra quyết định: SAFE / ALERT / NO_FACE / CALIBRATING | ~140 |
-| **occlusion_detector.py** | Mắt: phân tích pixel ở mũi/miệng để bỏ phiếu "có bị che không" | ~420 |
+| **state_machine.py** | Não bộ ra quyết định: SAFE / COVERED / NO_PERSON | ~150 |
+| **occlusion_detector.py** | Mắt: phân tích pixel ở mũi/miệng dựa vào skin-ratio để biết "có bị che không" | ~320 |
 
 ### Tại sao chia 3 file mà không gộp 1?
 
-**Câu trả lời chuẩn**: *"Em chia theo nguyên tắc Separation of Concerns. State machine không cần biết về OpenCV hay MediaPipe, nó chỉ nhận input boolean và quyết định state. Detector không cần biết về Telegram hay camera. Tách ra giúp em viết unit test cho state machine mà không cần camera thật — em có 59 test pass 100%. Nếu mai sau đổi từ MediaPipe sang model khác, em chỉ cần thay detector, state machine không phải đụng."*
+**Câu trả lời chuẩn**: *"Em chia theo nguyên tắc Separation of Concerns. State machine không cần biết về OpenCV hay MediaPipe, nó chỉ nhận input boolean và quyết định state. Detector không cần biết về Telegram hay camera. Tách ra giúp em viết unit test cho state machine mà không cần camera thật — em có 52 test pass 100%. Nếu mai sau đổi từ MediaPipe sang model khác, em chỉ cần thay detector, state machine không phải đụng."*
 
 ---
 
@@ -104,57 +104,60 @@ baby-ai-alert/
   │   khuôn mặt              │
   └────────┬─────────────────┘
            │
+  ┌────────┴────────┐
+  │ YOLO check      │  ~40-80ms(CPU), chạy mỗi 10 frame
+  │ "có người       │
+  │  trong khung?"  │
+  └────────┬────────┘
+           │
     ┌──────┴──────┐
     │             │
-  CÓ MẶT       MẤT MẶT
+  CÓ MẶT      KHÔNG MẶT
     │             │
-    ▼             ▼
-┌─────────────┐ ┌────────────────┐
-│ Detector    │ │ YOLO check     │
-│ 4-signal    │ │ "có người      │
-│ voting      │ │  trong khung?" │
-│             │ │  ~40-80ms(CPU) │
-│ ~6-12ms     │ └────────┬───────┘
-└──────┬──────┘          │
-       │                 │
-       └────────┬────────┘
-                ▼
-       ┌─────────────────┐
-       │ State Machine   │  ← QUYẾT ĐỊNH ALERT/SAFE
-       │  + Smoother     │     dựa trên 15 giây liên tục
-       └────────┬────────┘
-                ▼
-        ┌──────────────┐
-        │  ALERT?      │
-        └──┬───────┬───┘
-           │       │
-        Không    Có
-           │       │
-           │       ▼
-           │  ┌──────────────────────┐
-           │  │ 1. Lưu ảnh vào events│
-           │  │ 2. Lưu JSON metadata │
-           │  │ 3. Gửi Telegram      │
-           │  └──────────────────────┘
-           ▼
-       Tiếp tục
-       frame sau
+    ▼             │
+┌─────────────┐   │
+│ Detector    │   │  CÓ NGƯỜI = thấy mặt HOẶC YOLO thấy người
+│ skin-ratio  │   │  (giữ thêm 2s sau lần thấy gần nhất)
+│ ~6-12ms     │   │
+└──────┬──────┘   │
+       │          │
+       └────┬─────┘
+            ▼
+   ┌─────────────────┐
+   │ State Machine   │  ← QUYẾT ĐỊNH: SAFE / COVERED / NO_PERSON
+   │  + Smoother     │     dựa trên thời gian liên tục
+   └────────┬────────┘
+            ▼
+    ┌──────────────────┐
+    │ CẦN THÔNG BÁO?   │
+    └──┬────────────┬──┘
+       │            │
+     Không         Có
+       │            │
+       │            ▼
+       │  ┌──────────────────────┐
+       │  │ 1. Lưu ảnh vào events│
+       │  │ 2. Lưu JSON metadata │
+       │  │ 3. Gửi Telegram      │
+       │  └──────────────────────┘
+       ▼
+   Tiếp tục
+   frame sau
 ```
 
 ### Diễn giải từng bước (cho slide):
 
 1. **Đọc camera** (~3ms): OpenCV đọc 1 khung hình 640×480 từ webcam USB.
 2. **MediaPipe FaceMesh** (~60-90ms trên Pi 4): Google MediaPipe phát hiện 468 điểm landmark trên khuôn mặt (mắt, mũi, miệng, cằm...). Em chỉ dùng 4 điểm: 1 ở mũi (`NOSE_TIP=4`), 3 ở miệng (lip trên 13, giữa 14, lip dưới 17).
-3. **Cắt patch quanh landmark** (~1ms): mỗi điểm landmark, em cắt 1 ô vuông 70×70 pixel xung quanh. Đó là khu vực mũi/miệng cần giám sát.
-4. **Tính 4 tín hiệu cho mỗi patch** (~8ms):
-   - Histogram HSV (phân bố màu)
-   - Tỷ lệ pixel da (skin ratio)
-   - Mật độ cạnh (edge density bằng Canny)
-   - Phương sai Laplacian (lap variance = độ chi tiết)
-5. **Bỏ phiếu**: mỗi tín hiệu nói "có/không bị che". Nếu ≥2/4 phiếu nói "có" → patch đó bị che.
-6. **Smoother** (lọc nhiễu): cần CÓ ≥7/10 frame liên tiếp nói "bị che" mới chính thức coi là bị che → tránh false alert do landmark nhảy 1 frame.
-7. **State machine**: nếu đã ở trạng thái bị che trong 15 giây liên tục → **ALERT**.
-8. **Gửi cảnh báo**:
+3. **YOLO check người** (mỗi 10 frame): xác định trong khung còn ai không. Kết hợp với MediaPipe để biết "có người": thấy mặt HOẶC YOLO thấy người. Sau lần thấy gần nhất còn giữ "có người" thêm `PRESENCE_HOLD_SEC` (mặc định 2s) để MediaPipe rớt track vài frame trên Pi 4 không bị hiểu thành "mất người".
+4. **Cắt patch quanh landmark** (~1ms): mỗi điểm landmark, em cắt 1 ô vuông 70×70 pixel xung quanh. Đó là khu vực mũi/miệng cần giám sát.
+5. **Tính tín hiệu cho mỗi patch** (~8ms):
+   - Tỷ lệ pixel da (skin ratio) — tín hiệu QUYẾT ĐỊNH
+   - Histogram HSV (phân bố màu) — chỉ để hiển thị/log
+6. **Quyết định "bị che"**: nếu vùng mũi HOẶC miệng có skin ratio tụt sâu (mất màu da → có vật che) thì coi là bị che. Vote hiển thị dạng `/2` (skin + hist) nhưng chỉ skin quyết định.
+7. **Smoother** (lọc nhiễu): cần ≥7/10 frame liên tiếp nói "bị che" mới chính thức coi là bị che → tránh false alert do landmark nhảy 1 frame.
+8. **State machine**: nếu mũi/miệng bị che liên tục 15 giây → báo **CHE MŨI/MIỆNG**; nếu không thấy ai trong khung liên tục 15 giây → báo **MẤT NGƯỜI**.
+9. **Gửi thông báo**:
    - Lưu ảnh JPG + JSON metadata vào `events/`
    - Gửi ảnh + caption qua Telegram Bot API (chạy ở thread riêng để không chặn pipeline)
 
@@ -163,7 +166,9 @@ baby-ai-alert/
 | Thông số | Giá trị | Ý nghĩa |
 |---|---|---|
 | **FPS pipeline** | 6-8 FPS | Tốc độ thực tế trên Raspberry Pi 4 (640×480) |
-| **Ngưỡng alert** | 15 giây | Bị che liên tục bao lâu thì cảnh báo |
+| **Ngưỡng báo che** | 15 giây | Mũi/miệng bị che liên tục bao lâu thì báo (`OCCLUSION_THRESHOLD_SEC`) |
+| **Ngưỡng mất người** | 15 giây | Không thấy ai bao lâu thì báo (`NO_PERSON_SEC`) |
+| **Giữ presence** | 2 giây | Giữ "có người" sau lần thấy gần nhất (`PRESENCE_HOLD_SEC`) |
 | **Calibration** | 5 giây | Thời gian học baseline khuôn mặt trẻ |
 | **Smoother** | 7/10 frame | Lọc nhiễu trước state machine |
 | **Cooldown** | 60 giây | Không gửi alert trùng trong 60s |
@@ -181,55 +186,51 @@ baby-ai-alert/
 **Tại sao không tự train model?**
 > *"Em không có dataset đủ lớn và thời gian training. MediaPipe là solution mature, free, chính xác >95% trên benchmark phổ thông. Đề tài tập trung vào KỸ THUẬT PHÁT HIỆN BỊ CHE chứ không phải training face detector."*
 
-### 4.2 Tại sao cần 4 tín hiệu, không phải 1?
+### 4.2 Tại sao quyết định "bị che" CHỈ dựa vào skin-ratio?
 
-**Đây là điểm KHOE NHẤT của đồ án. Học thuộc luôn:**
+**Đây là điểm THIẾT KẾ QUAN TRỌNG sau khi viết lại logic. Học thuộc luôn:**
 
-> *"Mỗi tín hiệu có 1 điểm yếu riêng, không cái nào hoàn hảo. Em dùng 4 tín hiệu vote chéo để bù trừ lẫn nhau:"*
+> *"Em rút gọn lại: chỉ dùng tỷ lệ màu da (skin ratio) để quyết định. Lý do: mặt sạch — dù sáng, mờ hay áp sát camera — vùng mũi/miệng LUÔN là màu da. Vật che thật (chăn, gối, khăn, giấy, đồ chơi) thì KHÔNG phải màu da → skin ratio tụt mạnh. Đây là tín hiệu bền nhất với mặt sạch nên gần như không báo nhầm."*
 
-| Tín hiệu | Phát hiện tốt | Bị bịt mắt khi |
+| Tín hiệu | Vai trò | Lý do |
 |---|---|---|
-| **Histogram (màu sắc)** | Chăn xanh, gối đỏ phủ mặt → màu thay đổi | Tay che mặt — tay cùng tone da với mặt |
-| **Skin ratio (tỷ lệ da)** | Chăn/gối không có pixel da | Tay che mặt — tay LÀ da |
-| **Edge density (cạnh)** | Chăn phẳng → ít đường viền | Tay có nếp gấp, móng tay → vẫn nhiều cạnh |
-| **Laplacian variance (độ chi tiết)** | Lưng bàn tay phẳng, ít chi tiết | (yếu nhất khi ánh sáng đổi đột ngột) |
+| **Skin ratio (tỷ lệ da)** | QUYẾT ĐỊNH | Chăn/gối/khăn/giấy không có pixel da → skin tụt → coi là che. Mặt sạch luôn nhiều da → không bao giờ kích. |
+| **Histogram (màu sắc)** | Chỉ hiển thị/log | Vùng miệng cử động (bé mấp máy môi) làm histogram tụt oan → KHÔNG dùng để quyết định, chỉ để xem/ghi log. |
 
-**Câu phản hồi nếu hội đồng hỏi "tại sao thiết kế thế này"**:
-> *"Em đã test thực tế. Nếu chỉ dùng histogram (cách truyền thống), tay che mặt sẽ không phát hiện được — đây là failure mode nguy hiểm vì che mũi/miệng do trẻ tự đè tay lên mặt là kịch bản thực tế. Em phát hiện Laplacian variance là discriminator MẠNH NHẤT cho tình huống này: mặt có môi, lỗ mũi, lông mày → lap_var khoảng 1500. Lưng bàn tay phẳng → lap_var chỉ 3-5. Tỷ lệ chênh tới ~400 lần. Đây là phát hiện riêng em rút ra khi quan sát data."*
+**Tại sao bỏ edge density và Laplacian variance?**
+> *"Hai tín hiệu cũ đó đo ĐỘ NÉT của ảnh chứ không đo có vật che. Trên mặt nhìn rõ nhưng hơi mờ / áp sát camera, edge và lap_var tụt về gần 0 → bị hiểu nhầm là 'bị che' dù mặt vẫn sạch (xem các event cũ: skin=1.0, hist=0.96 mà vẫn bị vote che chỉ vì edge=0). Em đã bỏ hẳn 2 tín hiệu này để diệt đúng lớp false-positive đó."*
 
-### 4.3 Vote rule — bỏ phiếu chéo
+### 4.3 Quyết định "bị che" — chỉ skin quyết định
 
 ```
-Patch mũi: 4 phiếu (hist/skin/edge/lap)
-Patch miệng: 4 phiếu
+Patch mũi:  skin ratio, hist (hiển thị /2 phiếu)
+Patch miệng: skin ratio, hist (hiển thị /2 phiếu)
 
-Quyết định: BẤT KỲ patch nào (mũi HOẶC miệng) có ≥2/4 phiếu → coi là bị che
+Quyết định: BẤT KỲ patch nào (mũi HOẶC miệng) có skin ratio tụt
+            dưới ngưỡng (mất màu da) → coi là bị che.
+            Histogram chỉ hiển thị, KHÔNG tham gia quyết định.
 ```
 
-**Tại sao 2/4 mà không phải 3/4 hay 4/4?**
-> *"Em chọn 2/4 sau khi cân nhắc trade-off: 1/4 quá lỏng → nhiều false alert. 3/4 quá chặt → bỏ sót case tay che (chỉ có lap_var và edge vote, skin và hist không vote vì tay là da). 2/4 là điểm cân bằng cho phép phát hiện cả chăn (4/4 vote) và tay (vừa đủ 2/4 nhờ lap_var + edge)."*
+**Ngưỡng skin tính sao?**
+> *"Sau calibration, em tính ngưỡng `skin_min = skin_baseline × 0.5` (báo khi skin tụt hơn 50% so với baseline), kèm sàn tuyệt đối 0.15. Vật che thật làm skin tụt mạnh, vượt qua ngưỡng này; mặt sạch dao động nhẹ thì không."*
 
 **Tại sao BẤT KỲ patch nào, không phải CẢ HAI?**
-> *"Vì trong tình huống thực tế, đôi khi miệng bị che mà mũi vẫn lộ một phần, hoặc ngược lại. Quan trọng là EM CẢNH BÁO KỊP THỜI — an toàn của trẻ. Em chọn safety-first: 1 trong 2 patch nghi ngờ → alert."*
+> *"Vì trong tình huống thực tế, đôi khi miệng bị che mà mũi vẫn lộ một phần, hoặc ngược lại. Quan trọng là EM BÁO KỊP THỜI — an toàn của trẻ. Em chọn: 1 trong 2 vùng mất màu da → báo che."*
 
 ### 4.4 Calibration — "học baseline khuôn mặt"
 
 **Vấn đề**: Mỗi đứa trẻ có tone da khác nhau, ánh sáng phòng khác nhau. Threshold cố định không hoạt động.
 
 **Giải pháp**: Trong 5 giây đầu, app GHI NHỚ baseline mặt sạch:
-- Trung bình histogram (mean color distribution)
-- Trung bình skin ratio
-- Trung bình edge density
-- Trung bình Laplacian variance
+- Trung bình skin ratio (mean skin)
+- Trung bình histogram (mean color distribution) — chỉ để tham chiếu/hiển thị
 
 Sau đó tính threshold **ADAPTIVE** dựa trên phân bố quan sát:
-- `hist_threshold = mean_corr - 3 × stddev` (~99% confidence interval)
-- `skin_min = mean_skin × 0.55` (báo khi giảm 45%)
-- `edge_min = mean_edge × 0.70` (báo khi giảm 30%)
-- `lap_var_min = mean_lap × 0.50` (báo khi giảm 50%)
+- `skin_min = mean_skin × 0.5` (báo khi giảm hơn 50%), kèm sàn tuyệt đối 0.15
+- `hist_threshold` được tính nhưng KẸP bảo thủ trong [0.30, 0.55] và chỉ dùng để hiển thị/log
 
 **Câu mẫu giải thích**:
-> *"Em không hardcode threshold mà tính từ data thực tế của từng phiên. Mỗi user có baseline riêng. Hệ thống tự tính ngưỡng dựa trên độ ổn định (standard deviation) của các sample calibration."*
+> *"Em không hardcode threshold mà tính từ data thực tế của từng phiên. Mỗi user có baseline riêng. Tín hiệu quyết định là skin ratio — ngưỡng tính từ skin trung bình của các sample calibration."*
 
 ### 4.5 Smoothing buffer — "lọc nhiễu"
 
@@ -246,39 +247,38 @@ class SmoothingBuffer:
 
 ### 4.6 State Machine — "não bộ ra quyết định"
 
-**4 trạng thái**:
+**3 trạng thái cấp UI** (cộng pha CALIBRATING khi mới khởi động):
 
 | Trạng thái | Khi nào | Hành động |
 |---|---|---|
 | **CALIBRATING** | 5 giây đầu khi thấy mặt | Học baseline |
-| **NO_FACE** | Không thấy mặt + YOLO cũng không thấy người | Chờ (trẻ ra ngoài khung) |
-| **SAFE** | Thấy mặt, vote < 2/4 | Giám sát bình thường |
-| **ALERT** | Vote ≥ 2/4 đã ≥ 15 giây | Gửi Telegram + lưu event |
+| **NO_PERSON** | Không thấy mặt VÀ YOLO cũng không thấy người (đã quá thời gian giữ presence) | Đếm 15s → báo "Không thấy ai trong khung" |
+| **SAFE** | Có người, vùng mũi/miệng còn màu da | Giám sát bình thường |
+| **COVERED** | Có người, vùng mũi/miệng mất màu da (đang đếm/đã báo) | Đếm 15s → báo "Mũi/miệng bị che" |
 
-**3 trigger dẫn đến ALERT**:
-1. `TRIGGER_HISTOGRAM` — vote 4 tín hiệu phát hiện bị che (chăn, gối, tay...)
-2. `TRIGGER_FACE_LOST` — MẤT HOÀN TOÀN mặt nhưng YOLO khẳng định vẫn có người trong khung → suy ra trẻ bị phủ kín
-3. (Bonus) Hết grace 1.5 giây sau khi mặt biến mất → bắt đầu đếm về `face_lost`
+**2 trigger dẫn đến thông báo**:
+1. `covered` (`TRIGGER_COVERED`) — có người + vùng mũi/miệng bị che liên tục ≥ 15s.
+2. `no_person` (`TRIGGER_NO_PERSON`) — không thấy ai trong khung liên tục ≥ 15s.
+
+> *Không còn khái niệm "ngạt thở / nghi bị phủ kín". "Mất người" chỉ là thông báo sự việc ("không thấy ai trong khung"), KHÔNG suy diễn nguy hiểm.*
 
 **Câu thoại giải thích**:
-> *"Em không gửi alert ngay khi phát hiện che — có thể là che chớp 1 giây không sao. Em đếm 15 giây liên tục. Trong 15 giây đó, nếu mặt LẠI XUẤT HIỆN và sạch trở lại, đếm reset về 0. Đây là cơ chế tránh false alert quan trọng nhất."*
+> *"Em không gửi thông báo ngay khi phát hiện che — có thể là che chớp 1 giây không sao. Em đếm 15 giây liên tục. Có anti-flicker: phải sạch trở lại liên tục đủ lâu (1.5s) mới reset bộ đếm, nên 1 frame nhiễu không làm reset oan. Tương tự cho 'mất người'. Sau lần đầu đủ ngưỡng, nếu tình huống còn kéo dài thì nhắc lại định kỳ đến khi hết."*
 
-### 4.7 YOLO — vai trò phụ nhưng cốt lõi
+### 4.7 YOLO — phân biệt "còn người" vs "không còn ai"
 
 **Tại sao có YOLO?**
 
-> *"YOLO không phát hiện bị che — đó là việc của detector chính. YOLO là bộ check PHỤ cho tình huống KHÔNG thấy mặt. Nhưng em theo nguyên tắc SAFETY-FIRST: khi đang thấy mặt mà mặt biến mất → mặc định coi là NGHI BỊ PHỦ KÍN và đếm để báo, KHÔNG để YOLO=False hủy cảnh báo. Vì sao? Camera top-down, trẻ nằm bị chăn phủ → YOLO (train trên người đứng) hay sót → nếu tin 'YOLO không thấy = rời khung' thì BỎ LỌT ca bị che thật.*
-> *YOLO chỉ giúp 2 việc an toàn:*
-> - *YOLO thấy CÓ người mà không thấy mặt (trẻ chưa từng track mặt) → BẮT ĐẦU đếm.*
-> - *Khung trống, CHƯA TỪNG thấy mặt → im lặng (NO_FACE), không báo nhầm khi chưa đặt trẻ vào."*
+> *"YOLO không phát hiện bị che — đó là việc của detector chính. Vai trò của YOLO là giúp xác định CÓ NGƯỜI trong khung hay không. 'Có người' = MediaPipe thấy mặt HOẶC YOLO thấy người. Nhờ YOLO, khi bé quay đầu / úp mặt (MediaPipe không thấy mặt nhưng YOLO vẫn thấy thân người) thì hệ thống biết VẪN CÒN người trong khung → KHÔNG báo nhầm 'mất người', và cũng không tạo cảnh báo che mới vì không quan sát được mũi/miệng.*
+> *Ngược lại, khi thật sự không còn ai (cả MediaPipe lẫn YOLO đều không thấy) liên tục quá 15s → báo 'Không thấy ai trong khung'."*
 >
-> *"Đánh đổi em chấp nhận: nếu cha mẹ bế trẻ ra khỏi khung >15s thì vẫn có 1 cảnh báo nhầm — em ưu tiên KHÔNG BAO GIỜ MISS ca bị che hơn là tránh vài false alarm."*
+> *"Để mặt nhìn rõ KHÔNG bao giờ bị báo nhầm 'mất người', em giữ thêm `PRESENCE_HOLD_SEC` (mặc định 2s) sau lần thấy gần nhất — MediaPipe trên Pi 4 đôi khi rớt track vài frame, nhưng trong 2s đó vẫn coi là 'có người'."*
 
 **Tại sao YOLOv8n (nano) mà không phải s/m/l?**
 > *"Nano là phiên bản nhỏ nhất, 6MB, nhẹ nhất cho CPU. s/m/l chậm hơn nhiều, không real-time được trên Raspberry Pi 4 (không có NPU). Em không cần độ chính xác cao, chỉ cần biết 'có thân người' hay không."*
 
 **Tại sao không chạy YOLO mỗi frame?**
-> *"Để tối ưu CPU. Trên Pi 4 em set `YOLO_EVERY=10` — chỉ chạy 1 lần mỗi 10 frame, cache kết quả. Lý do: phân biệt 'rời khung' vs 'bị phủ' không cần real-time — 1-2 lần/giây là dư."*
+> *"Để tối ưu CPU. Trên Pi 4 em set `YOLO_EVERY=10` — chỉ chạy 1 lần mỗi 10 frame, cache kết quả. Lý do: xác định 'còn người trong khung hay không' không cần real-time — 1-2 lần/giây là dư."*
 
 ---
 
@@ -290,7 +290,7 @@ class SmoothingBuffer:
 
 **Q1. Em làm đề tài này giải quyết bài toán gì?**
 
-A: *"Em giải quyết bài toán phát hiện sớm khi mũi/miệng trẻ sơ sinh bị che (bởi chăn/gối/tay/vật lạ) — một yếu tố nguy cơ gây ngạt khi ngủ. Theo WHO, SIDS (Hội chứng đột tử ở trẻ sơ sinh) là nguyên nhân tử vong hàng đầu ở trẻ <1 tuổi, mà 1 nửa case có liên quan đến chăn/gối phủ kín mặt khi ngủ. Đề tài em tạo ra hệ thống cảnh báo sớm đúng tình huống này — khi mũi/miệng trẻ bị che. Em KHÔNG đo hô hấp/nhịp thở (việc đó cần cảm biến y tế chuyên dụng, ngoài phạm vi đồ án); em phát hiện dấu hiệu quan sát được bằng camera là mũi/miệng bị che."*
+A: *"Em giải quyết bài toán phát hiện sớm khi mũi/miệng trẻ sơ sinh bị che bởi vật lạ (chăn/gối/khăn/giấy/đồ chơi) — một yếu tố nguy cơ khi ngủ. Theo WHO, SIDS (Hội chứng đột tử ở trẻ sơ sinh) là nguyên nhân tử vong hàng đầu ở trẻ <1 tuổi, mà nhiều case có liên quan đến chăn/gối che mặt khi ngủ. Đề tài em tạo ra hệ thống cảnh báo sớm đúng tình huống này — khi mũi/miệng trẻ bị che, hoặc khi không còn thấy ai trong khung. Em KHÔNG đo hô hấp/nhịp thở (việc đó cần cảm biến y tế chuyên dụng, ngoài phạm vi đồ án); em chỉ phát hiện dấu hiệu quan sát được bằng camera."*
 
 **Q2. Sản phẩm của em phục vụ ai?**
 
@@ -302,11 +302,11 @@ A: *"Em thấy thị trường có nhiều baby monitor truyền thống chỉ p
 
 **Q4. Đề tài em có gì khác biệt so với sản phẩm thương mại?**
 
-A: *"3 điểm khác biệt: (1) Chạy 100% local trên Raspberry Pi 4, không cần cloud → không lo lộ video con. (2) Multi-signal voting thay vì 1 model AI duy nhất → robust hơn với edge case như tay che mặt. (3) Mã nguồn mở, cha mẹ kỹ thuật có thể tự deploy, tự sửa threshold."*
+A: *"3 điểm khác biệt: (1) Chạy 100% local trên Raspberry Pi 4, không cần cloud → không lo lộ video con. (2) Logic phát hiện đơn giản, dựa vào tỷ lệ màu da nên rất ít báo nhầm trên mặt nhìn rõ. (3) Mã nguồn mở, cha mẹ kỹ thuật có thể tự deploy, tự sửa threshold."*
 
 **Q5. Đâu là điểm khó nhất khi làm đồ án?**
 
-A: *"Khó nhất là phát hiện TAY che mặt. Hầu hết phương pháp dùng histogram màu sắc — mà tay cùng tone với mặt → corr cao → không phát hiện được. Em phải thử nhiều cách, cuối cùng phát hiện Laplacian variance là discriminator mạnh: mặt có nhiều chi tiết nhỏ (môi, lông mày, lỗ mũi), tay back trơn → tỷ lệ chênh ~400 lần. Đây là phát hiện thực nghiệm của em."*
+A: *"Khó nhất là TRÁNH BÁO NHẦM trên mặt nhìn rõ. Logic cũ của em từng dùng nhiều tín hiệu đo độ nét ảnh — mặt áp sát camera hay hơi mờ thì các tín hiệu đó tụt và bị hiểu nhầm là 'bị che' dù mặt vẫn sạch. Em đã viết lại, rút gọn về CHỈ dùng tỷ lệ màu da: mặt sạch luôn nhiều da nên không bao giờ kích, còn vật che (chăn/gối/khăn/giấy) thì mất màu da → skin tụt mạnh → báo đúng. Đây là bài học thực nghiệm quan trọng nhất của em."*
 
 ### B. Câu hỏi về công nghệ — tech stack (8 câu)
 
@@ -346,48 +346,42 @@ A: *"Phát hiện vẫn hoạt động bình thường, chỉ Telegram alert là
 
 **Q14. Em phát hiện mũi/miệng bị che bằng cách nào?**
 
-A: *"Em dùng MediaPipe để định vị tọa độ pixel của mũi và miệng trong khung hình. Sau đó cắt 1 patch 70x70 xung quanh, tính 4 tín hiệu hình ảnh, mỗi tín hiệu bỏ 1 phiếu 'có bị che hay không'. Nếu ≥2/4 phiếu nói 'có' → vote là bị che."*
+A: *"Em dùng MediaPipe để định vị tọa độ pixel của mũi và miệng trong khung hình. Sau đó cắt 1 patch 70x70 xung quanh, tính tỷ lệ màu da (skin ratio) trong patch đó. Nếu skin ratio tụt sâu so với baseline (mất màu da → có vật che) ở vùng mũi HOẶC miệng → coi là bị che. Em cũng tính histogram màu nhưng chỉ để hiển thị/log, không dùng để quyết định."*
 
-**Q15. <u>Liệt kê 4 tín hiệu và giải thích từng cái.</u>**
+**Q15. <u>Em dùng những tín hiệu nào và vì sao chỉ skin quyết định?</u>**
 
-A: *"Bốn tín hiệu là:*
-- *Histogram HSV correlation — đo độ giống về phân bố màu so với baseline. Bị thay đổi nhiều → không giống nữa → vote bị che.*
-- *Skin ratio — đếm tỷ lệ pixel có HSV nằm trong khoảng tone da. Bị chăn phủ → skin pixel giảm → vote bị che.*
-- *Edge density — đếm pixel có cạnh bằng thuật toán Canny. Chăn phẳng → ít cạnh → vote bị che.*
-- *Laplacian variance — đo độ biến thiên cường độ. Mặt nhiều chi tiết → variance cao. Tay phẳng → variance thấp → vote bị che."*
+A: *"Em tính 2 tín hiệu, nhưng chỉ 1 cái quyết định:*
+- *Skin ratio (QUYẾT ĐỊNH) — đếm tỷ lệ pixel có HSV nằm trong khoảng tone da. Mặt sạch luôn nhiều da; chăn/gối/khăn/giấy che → da biến mất → skin tụt → báo bị che.*
+- *Histogram HSV correlation (chỉ hiển thị/log) — đo độ giống phân bố màu so với baseline. Em KHÔNG dùng để quyết định vì khi bé cử động môi, histogram vùng miệng tụt oan dù mặt vẫn sạch.*
+*Em đã bỏ hẳn edge density và Laplacian variance vì chúng đo độ nét ảnh chứ không đo có vật che — gây báo nhầm trên mặt nhìn rõ nhưng hơi mờ/áp sát camera."*
 
 **Q16. Histogram HSV là gì? Em tính như thế nào?**
 
-A: *"Histogram là biểu đồ phân bố tần suất. Em chuyển ảnh BGR sang HSV, sau đó tính histogram 2D trên H (hue) và S (saturation), bỏ V (value) để bớt nhạy với độ sáng. Sử dụng cv2.calcHist với 36 bin cho H và 32 bin cho S, normalize về [0,1]. Khi check, em so sánh histogram hiện tại với baseline bằng cv2.compareHist với method CORREL — trả về [-1, 1]. Càng gần 1 càng giống."*
+A: *"Histogram là biểu đồ phân bố tần suất. Em chuyển ảnh BGR sang HSV, sau đó tính histogram 2D trên H (hue) và S (saturation), bỏ V (value) để bớt nhạy với độ sáng. Sử dụng cv2.calcHist với 36 bin cho H và 32 bin cho S, normalize về [0,1]. Khi check, em so sánh histogram hiện tại với baseline bằng cv2.compareHist với method CORREL — trả về [-1, 1]. Càng gần 1 càng giống. Lưu ý: giá trị này chỉ để hiển thị/log, không tham gia quyết định bị che."*
 
 **Q17. Tại sao bỏ kênh V (Value)?**
 
 A: *"V phản ánh độ sáng. Em không muốn nhạy với độ sáng vì đèn trong phòng có thể đổi (mây che, cha mẹ bật/tắt đèn). Chỉ dùng H (màu sắc) và S (độ bão hòa) → invariant tương đối với lighting."*
 
-**Q18. Canny edge detection là gì?**
+**Q18. Skin ratio em tính như thế nào?**
 
-A: *"Canny là thuật toán phát hiện cạnh kinh điển. Quy trình 5 bước: (1) Gaussian smoothing, (2) tính gradient bằng Sobel, (3) non-maximum suppression giữ pixel có gradient là cực đại, (4) double threshold 50/150 (em set CANNY_LOW=50, CANNY_HIGH=150), (5) edge tracking by hysteresis. Em đếm số pixel có cạnh / tổng pixel = edge density."*
+A: *"Em chuyển patch sang HSV rồi dùng cv2.inRange với 2 dải tone da (vì Hue của màu da wrap quanh 0/180). Đếm số pixel nằm trong dải da chia tổng số pixel = skin ratio. Mặt sạch ~0.8-1.0; chăn/gối/khăn/giấy thì gần 0. Đây là tín hiệu bền nhất với mặt sạch (không phụ thuộc độ nét ảnh)."*
 
-**Q19. Laplacian variance đo cái gì?**
+**Q19. Tại sao bỏ Laplacian variance và edge density?**
 
-A: *"Laplacian là đạo hàm bậc 2, đo độ biến thiên cường độ. Em tính cv2.Laplacian rồi lấy variance. Variance cao = có nhiều chi tiết nhỏ (texture). Mặt em → ~1500. Tay back → ~3-5. Đây là discriminator quan trọng nhất cho case tay che mặt."*
+A: *"Vì chúng đo ĐỘ NÉT/CHI TIẾT của ảnh chứ không đo có vật che. Trên mặt nhìn rõ nhưng hơi mờ hoặc áp sát camera, edge và lap_var tụt về gần 0 → bị hiểu nhầm là 'bị che' dù skin=1.0, hist=0.96 (mặt vẫn sạch). Em đã gặp đúng các event báo nhầm này nên loại bỏ 2 tín hiệu đó, chỉ giữ skin ratio."*
 
-**Q20. <u>Tại sao 2/4 mà không phải 3/4 hay 4/4?</u>**
+**Q20. <u>Hiển thị vote dạng /2 nghĩa là gì? Vote nào thực sự quyết định?</u>**
 
-A: *"Em chọn 2/4 sau khi cân nhắc trade-off thực nghiệm. 1/4 quá nhạy → nhiều false alert. 3/4 quá chặt → tay che mặt chỉ có 2 signal (lap + edge) vote, skin/hist không vote vì tay là da → 3/4 sẽ bỏ sót. 2/4 là sweet spot."*
+A: *"Mỗi vùng (mũi/miệng) hiển thị vote dạng `/2` gồm phiếu skin và phiếu hist cho người xem dễ theo dõi. NHƯNG quyết định bị che CHỈ dựa vào phiếu skin: nếu skin tụt dưới ngưỡng ở mũi HOẶC miệng → bị che. Phiếu hist chỉ để hiển thị/log, không làm thay đổi quyết định."*
 
 **Q21. Threshold của em hardcode hay adaptive?**
 
-A: *"Adaptive. Mỗi tín hiệu có threshold tính từ baseline calibration của user:*
-- *Histogram: `mean_corr - 3 × stddev` (~99% interval)*
-- *Skin: drop 45% so với baseline*
-- *Edge: drop 30%*
-- *Laplacian: drop 50%*
-*Em chỉ có 1 hardcoded floor là skin_min không được dưới 5% — để tránh threshold âm khi baseline cực thấp."*
+A: *"Adaptive. Ngưỡng skin tính từ baseline calibration của user: `skin_min = mean_skin × 0.5` (báo khi skin tụt hơn 50%), kèm sàn tuyệt đối 0.15 để tránh ngưỡng quá thấp. Ngưỡng histogram cũng được tính nhưng kẹp bảo thủ trong [0.30, 0.55] và chỉ dùng hiển thị."*
 
 **Q22. Calibration là gì? Tại sao cần?**
 
-A: *"Calibration là pha 5 giây đầu khi hệ thống thấy mặt trẻ. Trong 5 giây này em ghi mean của 4 tín hiệu, gọi là baseline. Threshold tính từ baseline. Cần vì mỗi đứa trẻ có tone da khác, ánh sáng phòng khác — threshold cố định sẽ false positive hoặc false negative."*
+A: *"Calibration là pha 5 giây đầu khi hệ thống thấy mặt trẻ. Trong 5 giây này em ghi mean skin ratio (và histogram) của mặt sạch, gọi là baseline. Ngưỡng skin tính từ baseline. Cần vì mỗi đứa trẻ có tone da khác, ánh sáng phòng khác — threshold cố định sẽ false positive hoặc false negative."*
 
 **Q23. Nếu calibration kém thì sao?**
 
@@ -395,11 +389,11 @@ A: *"Em có cơ chế gate: nếu mean_skin < 15% → tức là MediaPipe trỏ 
 
 **Q24. <u>Baseline có cập nhật theo thời gian không?</u>**
 
-A: *"Có, em có cơ chế adaptive baseline update. Khi đang ở SAFE và corr > 0.92 (rất ổn), em cập nhật baseline với learning rate 0.005 (rất chậm) bằng moving average. Mục đích: thích nghi với drift môi trường (ánh sáng đổi dần khi chiều xuống). NHƯNG em KHÔNG update khi đang trong alert hoặc vừa ra khỏi alert 300 frame (~10s) — tránh học vào trạng thái xấu."*
+A: *"Có, em có cơ chế adaptive baseline update. Khi đang ở SAFE và corr > 0.92 (rất ổn), em cập nhật baseline (cả skin và histogram) với learning rate 0.005 (rất chậm) bằng moving average. Mục đích: thích nghi với drift môi trường (ánh sáng đổi dần khi chiều xuống). NHƯNG em KHÔNG update khi đang trong sự kiện che hoặc vừa thoát ra 300 frame (~10s) — tránh học vào trạng thái xấu."*
 
-**Q25. Nếu mặt trẻ thay đổi nhiều (cử động, ngáp...) có bị alert nhầm không?**
+**Q25. Nếu mặt trẻ thay đổi nhiều (cử động, ngáp...) có bị báo nhầm không?**
 
-A: *"Em xử lý 3 lớp: (1) Smoothing buffer cần 7/10 frame liên tiếp mới confirm. (2) State machine cần 15 giây liên tục mới alert. (3) Threshold adaptive tính từ stddev nên đã 'cho phép' biến thiên hợp lý. Trẻ ngáp 1-2 giây không trigger alert."*
+A: *"Em xử lý nhiều lớp: (1) Quyết định chỉ dựa vào skin — cử động/ngáp không làm mất màu da nên skin không tụt. (2) Smoothing buffer cần 7/10 frame liên tiếp mới confirm. (3) State machine cần 15 giây liên tục mới báo, kèm anti-flicker 1.5s. Trẻ ngáp 1-2 giây không trigger thông báo."*
 
 ### D. Câu hỏi về State Machine (8 câu)
 
@@ -409,31 +403,31 @@ A: *"Để biến input liên tục (mỗi frame là 1 boolean 'occluded/not') t
 
 **Q27. Em có mấy state, kể tên?**
 
-A: *"4 state: CALIBRATING (5s đầu học baseline), SAFE (đang giám sát bình thường), NO_FACE (không có trẻ trong khung), ALERT (đang đếm 15s nghi ngờ)."*
+A: *"3 state cấp UI: SAFE (có người, mũi/miệng nhìn rõ), COVERED (có người, mũi/miệng bị che — đang đếm/đã báo), NO_PERSON (không thấy ai trong khung). Cộng pha CALIBRATING (5s đầu học baseline) khi mới khởi động."*
 
-**Q28. Khi nào chuyển từ SAFE sang ALERT?**
+**Q28. Khi nào chuyển từ SAFE sang COVERED?**
 
-A: *"Khi detector vote là 'occluded' VÀ chưa từng vào ALERT trong chu kỳ này. Đặt timer `occlusion_start = now`. Tiếp tục check mỗi frame. Nếu elapsed >= 15s → fire alert, set `alert_sent=True` để không bắn liên tục."*
+A: *"Khi có người trong khung VÀ detector báo vùng mũi/miệng mất màu da (skin tụt). Đặt timer `covered_start = now`. Tiếp tục check mỗi frame. Nếu elapsed >= 15s → gửi thông báo 'Mũi/miệng bị che'; nếu còn kéo dài thì nhắc lại định kỳ."*
 
-**Q29. Khi nào chuyển từ ALERT về SAFE?**
+**Q29. Khi nào chuyển từ COVERED về SAFE?**
 
-A: *"Khi detector vote 'safe' (mặt sạch trở lại). Reset `occlusion_start = None`, `alert_sent = False`. Sẵn sàng cho chu kỳ alert tiếp theo."*
+A: *"Khi mũi/miệng sạch trở lại. Em có anti-flicker: phải sạch liên tục đủ lâu (`safe_recovery_sec`, mặc định 1.5s) mới reset bộ đếm `covered_start` về None → 1 frame nhiễu không làm reset oan."*
 
-**Q30. <u>Khi mặt trẻ MẤT thì sao? Cảnh báo ngay không?</u>**
+**Q30. <u>Khi không thấy mặt trẻ thì sao? Báo ngay không?</u>**
 
-A: *"Không cảnh báo ngay. Em có grace period 1.5 giây — mặt mất chớp do MediaPipe lỡ track 1 frame là bình thường. Sau 1.5 giây vẫn mất → bắt đầu đếm cho trigger FACE_LOST."*
+A: *"Không báo ngay vì 'không thấy mặt' chưa chắc là 'không có người'. 'Có người' = MediaPipe thấy mặt HOẶC YOLO thấy người, và em còn giữ 'có người' thêm `PRESENCE_HOLD_SEC` (mặc định 2s) sau lần thấy gần nhất. Chỉ khi thật sự không còn ai (cả MediaPipe lẫn YOLO đều không thấy) liên tục 15s → mới báo 'Không thấy ai trong khung'."*
 
-**Q31. <u>Làm sao phân biệt 'trẻ rời khung' vs 'bị phủ kín mặt'? Cả hai đều không thấy mặt.</u>**
+**Q31. <u>Làm sao phân biệt 'bé quay đầu/úp mặt (còn người)' vs 'không còn ai'? Cả hai đều không thấy mặt.</u>**
 
-A: *"Em ưu tiên SAFETY-FIRST. Khi đang thấy mặt mà mặt đột ngột biến mất, em coi đó là NGHI BỊ PHỦ KÍN và đếm 15s rồi báo. Vì sao không tin tuyệt đối vào YOLO để nói 'rời khung'? Vì camera đặt top-down xuống cũi, YOLO train chủ yếu trên người đứng/ngồi → trẻ nằm bị chăn phủ thì YOLO HAY trả 'không có người' sai → nếu tin nó thì em BỎ LỌT đúng ca bị che nguy hiểm nhất. Em chấp nhận báo nhầm khi cha mẹ bế trẻ đi còn hơn miss. YOLO đóng vai phụ: nếu KHÔNG thấy mặt mà YOLO khẳng định CÓ người (trẻ chưa từng được track mặt nhưng nằm trong khung) → bắt đầu đếm; nếu khung trống chưa từng thấy mặt → im lặng (NO_FACE)."*
+A: *"Em dùng YOLO để xác định CÓ NGƯỜI. Khi MediaPipe không thấy mặt (bé quay đầu/úp mặt) nhưng YOLO vẫn thấy thân người → hệ thống biết VẪN CÒN người → KHÔNG báo 'mất người', đồng thời không tạo cảnh báo che mới vì lúc đó không quan sát được mũi/miệng. Chỉ khi cả MediaPipe lẫn YOLO đều không thấy (quá thời gian giữ presence) → mới báo 'Không thấy ai trong khung'. Đây là một thông báo sự việc, KHÔNG suy diễn nguy hiểm."*
 
-**Q32. Có thể vào ALERT mà không cần đếm 15 giây không?**
+**Q32. Có thể báo mà không cần đếm 15 giây không?**
 
-A: *"Không. Đếm 15s là cơ chế lọc cuối cùng để tránh false alert. Em có thể tinh chỉnh OCCLUSION_THRESHOLD_SEC qua env var nếu thấy cần."*
+A: *"Không. Đếm 15s là cơ chế lọc cuối cùng để tránh báo nhầm cho cả 2 loại thông báo. Em có thể tinh chỉnh OCCLUSION_THRESHOLD_SEC (che) và NO_PERSON_SEC (mất người) qua env var nếu thấy cần."*
 
-**Q33. Một alert có spam Telegram không nếu bị che liên tục?**
+**Q33. Một thông báo có spam Telegram không nếu tình huống kéo dài?**
 
-A: *"Không. Em có cooldown 60 giây — 1 alert đã gửi trong 60s vừa qua → không gửi nữa. Cộng với `alert_sent=True` flag, mỗi 'chu kỳ' bị che chỉ gửi 1 alert."*
+A: *"Không spam vô tội vạ. Em có cooldown 60 giây ở tầng gửi (defense-in-depth). State machine quản lý timing chính: sau lần đầu đủ ngưỡng, nếu tình huống còn kéo dài thì NHẮC LẠI định kỳ (mỗi `repeat_sec`, mặc định = ngưỡng) đến khi hết — để cha mẹ không bỏ lỡ. Thông báo đầu của sự kiện mới lưu ảnh; các lần nhắc lại chỉ gửi Telegram, không lưu ảnh trùng."*
 
 ### E. Câu hỏi về Telegram (6 câu)
 
@@ -443,7 +437,7 @@ A: *"3 lý do: (1) Telegram free, không tốn phí SMS. (2) Telegram gửi đư
 
 **Q35. Tin nhắn Telegram chứa gì?**
 
-A: *"Caption gồm: thời gian alert, số giây bị che, lý do trigger (FACE_LOST hay HISTOGRAM), số vote chi tiết của 4 tín hiệu cho mũi và miệng. Kèm ảnh JPG quality 92 chụp ngay thời điểm alert. Cha mẹ thấy ngay tình huống thực tế."*
+A: *"Có 2 mẫu tin tương ứng 2 loại thông báo. (1) Khi mũi/miệng bị che: tiêu đề `🚨 MŨI/MIỆNG CỦA BÉ ĐANG BỊ CHE!`, kèm thời gian, số giây bị che, và chi tiết vote mỗi vùng dạng `/2` (hist + skin) cho mũi và miệng. (2) Khi mất người: tiêu đề `⚠️ KHÔNG THẤY AI TRONG KHUNG`, kèm thời gian, số giây đã mất người, nhắc kiểm tra bé/camera. Cả hai đều kèm ảnh JPG quality 92 chụp ngay thời điểm đó. Cha mẹ thấy ngay tình huống thực tế."*
 
 **Q36. Em xử lý lúc Telegram fail (mất mạng) như thế nào?**
 
@@ -465,27 +459,28 @@ A: *"Có. Em đã thiết kế abstraction tốt — class `BabyMonitorV5.send_a
 
 **Q39. FPS thực tế bao nhiêu?**
 
-A: *"Trên Raspberry Pi 4 CPU-only: ~6-8 FPS end-to-end ở 640×480. Breakdown: MediaPipe 60-90ms, multi-signal detector 6-12ms, YOLO (chạy mỗi 10 frame, amortized) ~15-25ms, camera read 3ms. Tổng ~120-180ms/frame. State machine chỉ cần ≥6 FPS để hoạt động đúng → 6-8 FPS là vừa đủ an toàn (lý do em hạ xuống 480p thay vì 720p)."*
+A: *"Trên Raspberry Pi 4 CPU-only: ~6-8 FPS end-to-end ở 640×480. Breakdown: MediaPipe 60-90ms, detector skin-ratio 6-12ms, YOLO (chạy mỗi 10 frame, amortized) ~15-25ms, camera read 3ms. Tổng ~120-180ms/frame. State machine chỉ cần ≥6 FPS để hoạt động đúng → 6-8 FPS là vừa đủ an toàn (lý do em hạ xuống 480p thay vì 720p)."*
 
 **Q40. Em test đề tài thế nào? Có bao nhiêu test case?**
 
-A: *"Em có 59 unit test, chia 5 file:*
-- *test_state_machine.py — 14 test cho FSM: kịch bản safe flow, alert firing, recovery, grace period, YOLO override...*
-- *test_occlusion_detector.py — 16 test cho detector: calibration, blanket/hand detection, blur-gate, stability under landmark drift...*
+A: *"Em có 52 unit test, chia 5 file:*
+- *test_state_machine.py — 11 test cho FSM: safe flow, báo che fire ở ngưỡng, anti-flicker khi hết che, nhắc lại định kỳ, báo mất người ở ngưỡng, người quay lại xóa NO_PERSON, chỉ báo che khi có người...*
+- *test_occlusion_detector.py — 12 test cho detector: calibration, phát hiện chăn (skin thấp), chăn đỏ, mặt sạch có jitter KHÔNG báo nhầm, không update baseline khi đang che...*
 - *test_scene_monitor.py — 5 test cho blur-gate + frozen-frame + luma (watchdog).*
 - *test_alert_policy.py — 13 test cho logic timing: watchdog cảnh báo/khôi phục, heartbeat, nhắc hiệu chỉnh, cảnh báo khi điều kiện hiệu chỉnh kém (tối/mờ).*
 - *test_eval_metrics.py — 11 test cho logic đo lường (precision/recall/FPR/ROC/AUC + chọn ngưỡng tối ưu) dùng cho bộ công cụ đánh giá detector trên dữ liệu thật.*
-*Đặc biệt em có test test_check_on_hand_alerts để đảm bảo case tay che mặt — đây là failure mode khó nhất em đặc biệt verify."*
+*Đặc biệt em có test_clear_face_with_jitter_no_false_alert để đảm bảo mặt sạch (kể cả khi landmark nhảy) KHÔNG bị báo nhầm — đây là failure mode em đặc biệt verify."*
 
 **Q41. Tỷ lệ false positive / false negative bao nhiêu?**
 
-A: *"Em test với 4 kịch bản thực tế:*
-- *Mặt sạch 30 phút → 0 false alert (FP rate ~0%).*
-- *Tay che mặt 20 giây → alert đúng (TP=100%).*
-- *Chăn phủ kín 20 giây → alert đúng (TP=100%).*
-- *Khung trống chưa đặt trẻ → KHÔNG alert (TN=100%).*
-- *Rời khung NGẮN (<15s) rồi quay lại → KHÔNG alert (chưa đủ ngưỡng).*
-*Lưu ý trung thực: nếu rời khung >15s sau khi đã thấy mặt thì em CỐ Ý vẫn báo (`Mất hoàn toàn khuôn mặt`) — đây là đánh đổi safety-first, không phải false negative (xem Q31). Đây là test định tính, chưa có dataset chuẩn để báo cáo định lượng — điểm em sẽ improve."*
+A: *"Em test với các kịch bản thực tế:*
+- *Mặt sạch 30 phút → 0 báo nhầm (FP rate ~0%).*
+- *Chăn phủ mũi/miệng 20 giây → báo che đúng (TP=100%).*
+- *Khăn/giấy phủ mặt 20 giây → báo che đúng (TP=100%).*
+- *Khung trống chưa đặt trẻ → KHÔNG báo che (vì không có người).*
+- *Bé quay đầu/úp mặt nhưng YOLO vẫn thấy người → KHÔNG báo 'mất người'.*
+- *Bế bé ra khỏi khung > 15s → báo 'Không thấy ai trong khung' (đúng, đây là thông báo sự việc).*
+*Đây là test định tính, chưa có dataset chuẩn để báo cáo định lượng — điểm em sẽ improve."*
 
 **Q42. <u>Nếu hội đồng hỏi "tại sao không có dataset chuẩn?"</u>**
 
@@ -497,13 +492,13 @@ A: *"Em đã cài và chạy thực tế trên Raspberry Pi 4. INSTALL_PI4.md gh
 
 **Q44. Em có tài liệu hướng dẫn không?**
 
-A: *"File MD lớn INSTALL_PI4.md hướng dẫn deploy từ A-Z trên Raspberry Pi 4 gồm flash Raspberry Pi OS 64-bit, cài deps, cấu hình, systemd service, troubleshooting. Kèm TEST_RESULTS.md ghi 59 test case và tài liệu bảo vệ này."*
+A: *"File MD lớn INSTALL_PI4.md hướng dẫn deploy từ A-Z trên Raspberry Pi 4 gồm flash Raspberry Pi OS 64-bit, cài deps, cấu hình, systemd service, troubleshooting. Kèm TEST_RESULTS.md ghi các test case và tài liệu bảo vệ này."*
 
 ### G. Câu hỏi về tương lai (3 câu)
 
 **Q45. Hạn chế của đề tài là gì?**
 
-A: *"Em thẳng thắn: (1) Ánh sáng yếu/ban đêm chưa test kỹ — MediaPipe có thể mất tracking. (2) Trẻ nằm úp mặt xuống nệm hoàn toàn → MediaPipe không thấy → rơi vào nhánh FACE_LOST cộng YOLO, nhưng YOLO chỉ verify có thân người. (3) Đề tài chưa có IR camera cho ban đêm — em đang thiết kế phiên bản v6 thêm IR cam."*
+A: *"Em thẳng thắn: (1) Ánh sáng yếu/ban đêm chưa test kỹ — MediaPipe có thể mất tracking. (2) Khi trẻ úp mặt xuống nệm, MediaPipe không thấy mũi/miệng nên hệ thống KHÔNG tạo được cảnh báo che (chỉ đánh giá được khi thấy mặt); nếu YOLO vẫn thấy thân người thì hệ thống coi là 'còn người' và im lặng — đây là hạn chế em ghi nhận. (3) Đề tài chưa có IR camera cho ban đêm — em đang thiết kế phiên bản v6 thêm IR cam."*
 
 **Q46. Hướng phát triển tiếp theo là gì?**
 
@@ -520,19 +515,19 @@ A: *"Có tiềm năng. Chi phí phần cứng (~2.5 triệu: Raspberry Pi 4 + ca
 
 **Q48. Em có nghĩ đến dùng deep learning end-to-end không?**
 
-A: *"Có nghĩ đến. Có thể train CNN binary classifier nhận đầu vào 1 patch khuôn mặt, output 'occluded/clear'. Nhưng em không chọn vì: (1) Cần dataset hàng nghìn mẫu mặt trẻ sơ sinh — em không có. (2) Black box, khó debug khi sai. (3) Cách của em — 4 tín hiệu rời rạc — interpretable: mỗi alert em log rõ tín hiệu nào trigger, hội đồng có thể truy ngược root cause. Đây là design choice có chủ ý."*
+A: *"Có nghĩ đến. Có thể train CNN binary classifier nhận đầu vào 1 patch khuôn mặt, output 'occluded/clear'. Nhưng em không chọn vì: (1) Cần dataset hàng nghìn mẫu mặt trẻ sơ sinh — em không có. (2) Black box, khó debug khi sai. (3) Cách của em — dựa vào skin ratio — interpretable: mỗi thông báo em log rõ skin/hist của mũi và miệng, hội đồng có thể truy ngược root cause. Đây là design choice có chủ ý."*
 
-**Q49. Em có thể giải thích cụ thể tại sao Laplacian variance phân biệt được tay và mặt?**
+**Q49. Em có thể giải thích cụ thể tại sao skin ratio phân biệt được mặt sạch và vật che?**
 
-A: *"Laplacian là kernel [[0,1,0],[1,-4,1],[0,1,0]] tính đạo hàm bậc 2. Variance của ảnh sau Laplacian = đo độ 'sốc' về cường độ. Mặt có môi (vùng đỏ), lông mày (vùng đen), lỗ mũi (đen), tròng mắt — các vùng nhỏ có gradient lớn giữa các pixel → variance cao. Lưng bàn tay thì tone gần như đồng đều, gradient nhỏ → variance thấp. Test thực tế: face_lap ~1391, hand_lap ~3 → tỷ lệ 463 lần."*
+A: *"Skin ratio đếm tỷ lệ pixel có HSV nằm trong dải tone da. Mặt sạch — dù sáng, mờ hay áp sát camera — vùng mũi/miệng vẫn là da nên skin ratio cao (~0.8-1.0). Vật che (chăn/gối/khăn/giấy/đồ chơi) có màu khác da nên pixel rơi ra ngoài dải tone da → skin tụt mạnh, thường về gần 0. Vì tín hiệu này không phụ thuộc độ nét ảnh nên mặt sạch không bao giờ bị báo nhầm — đây là lý do em chọn skin ratio làm tín hiệu quyết định."*
 
 **Q50. <u>Code em chạy CPU mà sao đủ nhanh cho real-time?</u>**
 
 A: *"Vì em tối ưu được pipeline:*
 - *MediaPipe được Google compile native ARM, không phải Python pure.*
-- *OpenCV operations (Canny, Laplacian, calcHist) đều là C-level.*
+- *OpenCV operations (cvtColor, inRange, calcHist) đều là C-level.*
 - *Em chỉ cắt patch nhỏ 70×70 — phép tính chạy trên patch tốn ít hơn ảnh full.*
-- *YOLO chạy mỗi 5 frame, không phải mỗi frame.*
+- *YOLO chạy mỗi 10 frame, không phải mỗi frame.*
 - *Smoother + state machine là logic pure Python, microsecond.*
 *Cộng lại: 80-100ms/frame trên ARM = 10-12 FPS. State machine chỉ cần ≥6 FPS để hoạt động. Em dư an toàn."*
 
@@ -565,7 +560,7 @@ Kiểm tra:
 
 Vẽ trên slide:
 ```
-[Camera USB] → [Raspberry Pi 4: MediaPipe + 4-signal Detector + YOLO + FSM] → [Telegram]
+[Camera USB] → [Raspberry Pi 4: MediaPipe + Skin-ratio Detector + YOLO + FSM] → [Telegram]
 ```
 
 > *"Em dùng Raspberry Pi 4 (chip BCM2711, 4 nhân Cortex-A72), USB webcam Logitech, và 1 module relay 4 kênh. Phần mềm em viết bằng Python, tách rõ 3 module: detector chuyên về phân tích pixel, state machine ra quyết định, main module điều phối."*
@@ -581,21 +576,21 @@ HEADLESS=0 python src/main.py
 
 1. *"Đầu tiên, hệ thống calibrate trong 5 giây — em giữ yên mặt trước camera."*
 2. *"Em đã calibrate xong, status SAFE. Em mở Telegram cho hội đồng xem [show điện thoại]."*
-3. **Test 1**: *"Bây giờ em che mặt bằng tay — sau 15 giây sẽ có cảnh báo."*
+3. **Test 1**: *"Bây giờ em phủ một mảnh khăn/giấy lên vùng mũi/miệng — sau 15 giây sẽ có thông báo 'Mũi/miệng bị che'."*
    → Đếm to thành tiếng "1, 2, 3..."
    → Telegram kêu, mở ra cho hội đồng xem
-4. **Test 2**: *"Tiếp em rời khung trong thời gian NGẮN (dưới 15 giây) rồi quay lại — KHÔNG có cảnh báo vì chưa đủ ngưỡng 15s."*
+4. **Test 2**: *"Tiếp em rời hẳn khung hình rồi quay lại — sau 15 giây không thấy ai sẽ có thông báo 'Không thấy ai trong khung'; nếu quay lại trước 15s thì KHÔNG có thông báo."*
    → Bước ra khỏi khung ~8-10s (DƯỚI 15s), không có notification → quay lại, về SAFE
-   → ⚠️ *Lưu ý khi demo: ĐỪNG đứng ngoài khung quá 15s — vì safety-first, mặt biến mất ≥15s sẽ kích `Mất hoàn toàn khuôn mặt` (đây là chủ đích để không bỏ lọt trẻ bị phủ kín, không phải lỗi). Nếu hội đồng hỏi, trả lời theo Q31.*
+   → ⚠️ *Lưu ý khi demo: nếu muốn show thông báo 'mất người', đứng ngoài khung > 15s — đây là thông báo sự việc bình thường, không phải lỗi. Nếu hội đồng hỏi, trả lời theo Q31.*
 
 **3:00-4:00 — Highlight kỹ thuật**
 
-Show slide chứa 4 tín hiệu, giải thích NGẮN:
-> *"Điểm em đặc biệt muốn nhấn mạnh là cách phát hiện tay che mặt — case khó nhất. Em phát hiện Laplacian variance là discriminator mạnh: mặt em ~1500, lưng tay ~3, chênh 400 lần. 3 tín hiệu khác (histogram, skin, edge) bị defeat bởi tay vì tay có màu da và có nếp nhăn. Em vote 4 tín hiệu chéo, ≥2/4 phiếu là alert. Đây là design quan trọng của đồ án."*
+Show slide tín hiệu skin-ratio, giải thích NGẮN:
+> *"Điểm em muốn nhấn mạnh là cách hệ thống tránh báo nhầm trên mặt nhìn rõ. Em chỉ dùng tỷ lệ màu da để quyết định: mặt sạch luôn nhiều da nên không bao giờ kích; vật che (chăn/gối/khăn/giấy) mất màu da nên skin tụt mạnh → báo đúng. Em đã bỏ các tín hiệu đo độ nét ảnh vì chúng gây báo nhầm khi mặt hơi mờ/áp sát camera. Histogram em vẫn tính nhưng chỉ để hiển thị. Đây là quyết định thiết kế quan trọng của đồ án."*
 
 **4:00-5:00 — Kết luận**
 
-> *"Tổng kết, đề tài em giải quyết bài toán cảnh báo che mũi/miệng real-time, 100% local trên Raspberry Pi 4 giá rẻ. Phát hiện multi-signal robust với edge case tay che. Có 59 unit test pass, đã chạy production trên thiết bị thực. Hướng phát triển tiếp theo là gắn Coral USB TPU tăng tốc person detection, thêm IR camera cho ban đêm, và tích hợp relay đã có sẵn để kích còi báo động hardware."*
+> *"Tổng kết, đề tài em giải quyết bài toán cảnh báo che mũi/miệng (và mất người) real-time, 100% local trên Raspberry Pi 4 giá rẻ. Logic phát hiện đơn giản, dựa vào tỷ lệ màu da nên rất ít báo nhầm. Có 52 unit test pass, đã chạy production trên thiết bị thực. Hướng phát triển tiếp theo là gắn Coral USB TPU tăng tốc person detection, thêm IR camera cho ban đêm, và tích hợp relay đã có sẵn để kích còi báo động hardware."*
 >
 > *"Em xin sẵn sàng nhận câu hỏi từ hội đồng."*
 
@@ -628,7 +623,7 @@ Show slide chứa 4 tín hiệu, giải thích NGẮN:
 
 ### Điểm 4: Robust testing
 
-> *"Em có 59 unit test pass 100%. Đặc biệt test_hand_stability_under_landmark_drift mô phỏng MediaPipe nhảy landmark ngẫu nhiên — verify rằng alert vẫn fire ổn định 100% với 9/9 frame dù landmark di chuyển 5-10 pixel."*
+> *"Em có 52 unit test pass 100%. Đặc biệt test_clear_face_with_jitter_no_false_alert mô phỏng MediaPipe nhảy landmark ngẫu nhiên trên mặt sạch — verify rằng hệ thống KHÔNG báo nhầm dù landmark di chuyển vài pixel."*
 
 ### Điểm 5: Production-ready
 
@@ -641,7 +636,7 @@ Show slide chứa 4 tín hiệu, giải thích NGẮN:
 ### Điểm 7: 3 lớp logic chất lượng/an toàn bổ sung
 
 > *"Em thêm 3 lớp nâng chất lượng, đều rẻ CPU (~5ms, module `scene_monitor.py`):*
-> - *Blur-gate: khi cả khung mờ (autofocus hunting / motion blur ở FPS thấp) thì edge/lap tụt về 0 — em phát hiện và BỎ 2 phiếu texture đó, chỉ tin màu+da. Đây là cách em diệt đúng lớp false-positive đã từng gặp. Mấu chốt: che thật chỉ làm mờ vùng mặt, nền vẫn nét → độ nét toàn cục không sụt → không nhầm.*
+> - *Blur-gate (giám sát độ nét toàn cục): khi cả khung mờ (autofocus hunting / motion blur ở FPS thấp), em dùng tín hiệu này để KHÔNG học baseline vào lúc đó và để cảnh báo điều kiện hiệu chỉnh kém — vì baseline mờ là baseline rác. Quyết định 'bị che' của detector chỉ dựa vào skin ratio nên vốn đã bền với mờ; blur-gate chủ yếu phục vụ chất lượng calibration + watchdog camera.*
 > - *Watchdog + heartbeat: thiết bị an toàn KHÔNG được fail âm thầm — em tự giám sát camera đơ / quá tối / FPS sụp và gửi cảnh báo 'giám sát suy giảm', cộng heartbeat định kỳ 'vẫn đang canh'.*
 > - *Thông báo khởi động: lúc bật máy, hệ thống gửi Telegram yêu cầu đưa mặt trẻ vào khung để hiệu chỉnh, nhắc lại nếu quên, và xác nhận khi đã bắt đầu giám sát — phòng trường hợp người dùng quên đặt trẻ/chỉnh camera mà tưởng đã được canh.*
 > - *Cổng chất lượng hiệu chỉnh: baseline là "định nghĩa mặt sạch" mà mọi lần phát hiện che về sau so sánh với, nên em CHỈ học baseline từ frame đủ sáng + không mờ. Nếu phòng quá tối / hình mờ kéo dài, vì máy chạy không màn hình nên em gửi Telegram hướng dẫn cụ thể (bật đèn / chỉnh tiêu cự) và chờ điều kiện tốt thay vì học một baseline rác — đây là cách em tăng độ tin cậy thực địa ngay từ khâu quan trọng nhất."*
@@ -673,11 +668,11 @@ Ví dụ:
 
 ### Câu khó 4: "Em test trên bao nhiêu trẻ thật?"
 
-✅ **Nói thật, đừng nói dối**: *"Em không test trên trẻ sơ sinh thật vì vấn đề đạo đức + an toàn — phải có IRB approval. Em test trên ngôi mặt em và bạn em trong các kịch bản mô phỏng: chăn phủ, gối phủ, tay che mặt, rời khung. Đây là hạn chế em chấp nhận. Hướng phát triển: hợp tác khoa Nhi để có IRB approved data."*
+✅ **Nói thật, đừng nói dối**: *"Em không test trên trẻ sơ sinh thật vì vấn đề đạo đức + an toàn — phải có IRB approval. Em test trên ngôi mặt em và bạn em trong các kịch bản mô phỏng: chăn phủ, gối phủ, khăn/giấy phủ mũi/miệng, rời khung (mất người). Đây là hạn chế em chấp nhận. Hướng phát triển: hợp tác khoa Nhi để có IRB approved data."*
 
 ### Câu khó 5: "Nếu trẻ úp mặt xuống nệm hoàn toàn thì sao?"
 
-✅ *"Đây là edge case nguy hiểm. Trường hợp này MediaPipe sẽ không thấy mặt — rơi vào nhánh FACE_LOST. YOLO check 'có người trong khung?' → có thân (chỉ không thấy mặt) → đếm 15s rồi alert với reason FACE_LOST + caption 'Mất hoàn toàn khuôn mặt — nghi bị phủ kín'. Em xử lý case này trong state_machine.py nhánh 2c."*
+✅ *"Em trả lời thẳng đây là hạn chế. Khi trẻ úp mặt, MediaPipe không thấy mũi/miệng nên detector KHÔNG đánh giá được vùng mũi/miệng → không tạo cảnh báo che cho tình huống này. Nếu YOLO vẫn thấy thân người thì hệ thống coi là 'còn người' và im lặng (không báo 'mất người'). Đây là giới hạn của cách tiếp cận camera + landmark; hướng khắc phục là thêm IR camera ban đêm và mở rộng tín hiệu phát hiện ở phiên bản sau. Em không phóng đại khả năng của hệ thống ở case này."*
 
 ### Câu khó 6: "Cha mẹ ngủ thì sao? Alert có đánh thức không?"
 

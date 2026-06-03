@@ -1,7 +1,7 @@
 # Bộ công cụ đánh giá (Hướng A) — đo + tinh chỉnh bộ phát hiện che
 
 Mục tiêu: biến *"em nghĩ thuật toán robust"* → **"em ĐO được X% recall ở Y% báo nhầm"**,
-và chọn **ngưỡng tối ưu** thay cho các con số đang đặt bằng tay (`vote≥2`, các `*_DROP_FRAC`).
+và chọn **ngưỡng tối ưu** cho `SKIN_DROP_FRAC` (tín hiệu quyết định "che" hiện tại).
 
 Đây là **công cụ DEV** — chạy trên máy bạn / Pi để chuẩn bị số liệu + bằng chứng cho
 báo cáo. KHÔNG phải code chạy production. Logic đo nằm ở
@@ -54,7 +54,7 @@ PYTHONIOENCODING=utf-8 python scripts/extract_features.py --dataset dataset --ou
 Script chạy MediaPipe + `OcclusionDetector` thật qua từng clip: hiệu chỉnh trên
 `calib` của session, rồi mỗi frame **thấy mặt** xuất 1 dòng gồm tín hiệu thô, phiếu,
 quyết định hiện tại, và **đặc trưng tương đối** (dành cho hướng B sau này) + nhãn.
-Frame mất mặt được bỏ qua (đó là đường `face_lost`, không thuộc bộ phát hiện che).
+Frame mất mặt được bỏ qua (đó là đường "mất người", không thuộc bộ phát hiện che).
 
 Cần `cv2` + `mediapipe` (đã có trong requirements). Tuỳ chọn `--calib-sec`, `--mp-conf`.
 
@@ -68,7 +68,7 @@ PYTHONIOENCODING=utf-8 python scripts/evaluate.py --csv dataset.csv --plot   # +
 ```
 
 Báo cáo gồm:
-- **Rule hiện tại** (`vote ≥ 2`): precision / recall / **FPR (báo nhầm)** / F1.
+- **Rule hiện tại** (skin-drop ở bất kỳ vùng mũi/miệng): precision / recall / **FPR (báo nhầm)** / F1.
 - **Quét ngưỡng 0..4**: để thấy đặt ngưỡng nào cho tradeoff nào.
 - **AUC** (diện tích dưới ROC): ≥0.9 xuất sắc · ≥0.8 tốt · ≥0.7 khá.
 - **3 gợi ý ngưỡng tối ưu**: Youden (cân bằng), F1, và **An toàn** (recall cao nhất
@@ -90,7 +90,7 @@ Báo cáo gồm:
 
 → Chọn ngưỡng theo **triết lý safety-first**: ưu tiên recall cao, nhưng ghìm FPR dưới
 mức chịu được (dùng gợi ý "An toàn"). Con số chọn được chính là cơ sở để **chỉnh
-`vote≥?` / các `*_DROP_FRAC`** trong [src/occlusion_detector.py](src/occlusion_detector.py)
+`SKIN_DROP_FRAC`** trong [src/occlusion_detector.py](src/occlusion_detector.py)
 — giờ là *đo được* thay vì *đoán*.
 
 ---

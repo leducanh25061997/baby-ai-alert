@@ -1,30 +1,25 @@
-"""Multi-signal occlusion detector — phát hiện che mũi/miệng bằng vote.
+"""Bộ phát hiện CHE mũi/miệng — đơn giản, robust, ít báo nhầm.
 
-4 tín hiệu yếu, mỗi cái yếu ở chỗ khác → vote chéo cho robust.
+Triết lý sau khi viết lại: chỉ dùng 2 tín hiệu BỀN với mặt sạch:
 
-  1. **Histogram correlation** (HSV color distribution)
-     - Mạnh: phát hiện thay đổi tổng thể về màu
-     - Yếu: tay che mặt → skin tone giống → corr cao → không phát hiện được
+  1. **Skin ratio** (tỉ lệ điểm ảnh màu da trong vùng mũi/miệng)
+     - Vật che thật (chăn/gối/khăn/giấy/đồ chơi) → KHÔNG phải màu da → skin tụt mạnh.
+     - Mặt sạch → vùng mũi/miệng vẫn là da → skin cao. Đây là tín hiệu CHÍNH.
 
-  2. **Skin pixel ratio** (HSV skin segmentation)
-     - Mạnh: chăn/gối thường có skin% rất thấp
-     - Yếu: bàn tay là skin → không phân biệt
+  2. **Histogram correlation** (phân bố màu H,S so với baseline)
+     - Bù cho vật che TÌNH CỜ có màu gần da: phân bố màu vẫn đổi mạnh.
+     - Chỉ tính là "che" khi corr tụt RẤT sâu (< ngưỡng bảo thủ ~0.55) → mặt
+       sạch dao động nhẹ (corr 0.85–0.99) KHÔNG bao giờ kích.
 
-  3. **Edge density** (Canny edges/pixel)
-     - Mạnh: chăn phẳng → ít edge
-     - Yếu: tay có khớp/nếp nhăn → edge tương đương → không phát hiện
+ĐÃ BỎ HẲN edge density + Laplacian variance. Hai tín hiệu đó đo *độ nét ảnh*,
+không đo *có vật che* — chúng tụt về 0 trên mặt sạch/áp sát/hơi mờ và là nguyên
+nhân chính gây báo nhầm "bị che" trên mặt nhìn rõ (xem events/ cũ: skin=1.0,
+hist=0.96 mà vẫn bị vote che chỉ vì edge=0).
 
-  4. **Laplacian variance** (intensity variance → "độ chi tiết nhỏ")
-     - Mạnh: phân biệt **mặt** (môi+lông+lỗ mũi → high var) vs **tay back**
-       (uniform skin → low var). Đây là discriminator chính cho tay che.
-     - Yếu: ánh sáng đột ngột đổi (nhưng baseline_update đã handle)
-
-**Vote**: occluded khi ≥2/4 tín hiệu trên cùng 1 patch đồng ý bị che.
-Phải vượt qua 2 trong 4 đường tấn công khác chiều → robust với cả chăn (color
-yếu) lẫn tay (texture yếu).
-
-Calibration tính threshold ADAPTIVE theo phân bố quan sát được (mỗi user +
-môi trường có ngưỡng riêng) và báo quality để user biết có nên recalibrate.
+Quyết định "che" CHỈ dựa vào skin-drop (tín hiệu bền nhất với mặt sạch). Histogram
+được tính để hiển thị/log nhưng KHÔNG dùng để quyết định — vùng miệng đổi histogram
+mạnh khi bé cử động môi nên dễ gây báo nhầm.
+Tính bền theo thời gian do main.py lo (SmoothingBuffer + ngưỡng thời gian).
 """
 from __future__ import annotations
 import cv2
@@ -37,18 +32,13 @@ from typing import Optional
 NOSE_TIP     = 4
 MOUTH_CENTER = 14
 
-# Multi-landmark sampling cho mouth — robust khi mediapipe nhảy landmark
-# giữa các vị trí khác nhau trên tay che mặt. Lấy 3 patch: lip trên, giữa,
-# lip dưới. Detection aggregate bằng MIN (worst-case patch) cho edge/lap_var.
-MOUTH_LANDMARK_INDICES = [13, 14, 17]   # upper lip top / mouth center / lower lip bottom
-NOSE_LANDMARK_INDICES  = [4]            # nose tip is enough (nhỏ hơn)
+# Multi-landmark sampling cho mouth — robust khi mediapipe nhảy landmark.
+MOUTH_LANDMARK_INDICES = [13, 14, 17]   # upper lip / mouth center / lower lip
+NOSE_LANDMARK_INDICES  = [4]
 
-PATCH_SIZE = 70   # tăng từ 50 → 70: patch lớn hơn → baseline có nhiều
-                  # facial detail hơn → discrimination tốt hơn + ít nhạy với
-                  # landmark drift
+PATCH_SIZE = 70
 
 # Skin tone HSV ranges. Hue wraps quanh 0/180 (red), cần 2 range.
-# Tone Á/Âu nằm hầu hết trong [H 0-25, S 30-180, V 60-255].
 SKIN_HSV_RANGES = [
     (np.array([0,   30, 60],  dtype=np.uint8),
      np.array([25,  180, 255], dtype=np.uint8)),
@@ -56,27 +46,21 @@ SKIN_HSV_RANGES = [
      np.array([180, 180, 255], dtype=np.uint8)),
 ]
 
-# Canny edge thresholds
-CANNY_LOW, CANNY_HIGH = 50, 150
-
 # Calibration:
-MIN_CALIB_SAMPLES        = 30
-# Adaptive hist threshold = mean_self_corr - K_HIST * stddev. K=3 = ~99% interval.
-K_HIST                   = 3.0
-# Skin/edge/lap_var: alert khi drop > FRAC × baseline
-SKIN_DROP_FRAC           = 0.45
-EDGE_DROP_FRAC           = 0.30   # tighter
-LAPVAR_DROP_FRAC         = 0.50   # tighter — bị che = drop ≥ 50% variance
-
-# BỎ HOÀN TOÀN absolute floors — chúng gây false-positive khi baseline thấp.
-# Threshold giờ thuần adaptive theo baseline thực tế của user.
-# Nếu baseline edge=0, threshold=0, current 0 sẽ KHÔNG vote (tránh false +).
-EDGE_ABSOLUTE_FLOOR      = 0.0
-LAPVAR_ABSOLUTE_FLOOR    = 0.0
+MIN_CALIB_SAMPLES = 30
+# Adaptive hist threshold = mean_self_corr - K_HIST*stddev, nhưng KẸP bảo thủ
+# trong [0.30, 0.55] → chỉ kích khi corr tụt RẤT sâu (vật che thật), mặt sạch
+# dao động nhẹ không bao giờ kích.
+K_HIST          = 3.0
+HIST_FLOOR_MIN  = 0.30
+HIST_FLOOR_MAX  = 0.55
+# Skin: che khi skin tụt > 50% so với baseline; sàn tuyệt đối 0.15.
+SKIN_DROP_FRAC  = 0.50
+SKIN_ABS_FLOOR  = 0.15
 
 # Conservative baseline update:
-BASELINE_UPDATE_CORR_MIN = 0.92    # chỉ update khi rất confident SAFE
-BASELINE_UPDATE_RATE     = 0.005   # chậm hơn để đỡ drift (cũ: 0.01)
+BASELINE_UPDATE_CORR_MIN            = 0.92
+BASELINE_UPDATE_RATE                = 0.005
 FRAMES_AFTER_ALERT_TO_RESUME_UPDATE = 300   # ~10s ở 30fps
 
 
@@ -95,64 +79,33 @@ def extract_patch(frame, landmark, w: int, h: int, size: int = PATCH_SIZE):
 
 
 def compute_signals(patch_bgr) -> dict:
-    """Trả về {hist, skin_ratio, edge_density, lap_var} cho 1 patch."""
-    hsv  = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2GRAY)
+    """Trả về {hist, skin_ratio} cho 1 patch (chỉ 2 tín hiệu bền)."""
+    hsv = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2HSV)
 
-    # 1. HSV 2D histogram (H, S) — không lấy V để bớt nhạy với độ sáng
+    # HSV 2D histogram (H, S) — bỏ V để bớt nhạy với độ sáng
     hist = cv2.calcHist([hsv], [0, 1], None, [36, 32], [0, 180, 0, 256])
     cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
 
-    # 2. Skin ratio
+    # Skin ratio
     masks = [cv2.inRange(hsv, lo, hi) for lo, hi in SKIN_HSV_RANGES]
     skin_mask = masks[0]
     for m in masks[1:]:
         skin_mask = cv2.bitwise_or(skin_mask, m)
     skin_ratio = float(np.count_nonzero(skin_mask)) / skin_mask.size
 
-    # 3. Edge density (Canny)
-    edges = cv2.Canny(gray, CANNY_LOW, CANNY_HIGH)
-    edge_density = float(np.count_nonzero(edges)) / edges.size
-
-    # 4. Laplacian variance — discriminator cho hand-vs-face.
-    # Mặt: môi/lông/lỗ mũi → high variance. Tay back: uniform → low.
-    # Đây là discriminator MẠNH NHẤT cho case tay che (mà 3 signal trên fail).
-    lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-
-    return {
-        'hist': hist.astype(np.float32),
-        'skin_ratio': skin_ratio,
-        'edge_density': edge_density,
-        'lap_var': lap_var,
-    }
+    return {'hist': hist.astype(np.float32), 'skin_ratio': skin_ratio}
 
 
 def _hist_corr(h1, h2) -> float:
     return float(cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL))
 
 
-def _aggregate_avg(sigs_list: list[dict]) -> dict:
-    """Aggregate cho CALIBRATION — dùng AVG để capture face state tiêu biểu."""
+def _aggregate(sigs_list: list[dict]) -> dict:
+    """Gộp nhiều patch (mouth multi-landmark) bằng MEAN — mượt, ổn định."""
     hist = np.mean([s['hist'] for s in sigs_list], axis=0).astype(np.float32)
     return {
-        'hist':         hist,
-        'skin_ratio':   float(np.mean([s['skin_ratio']   for s in sigs_list])),
-        'edge_density': float(np.mean([s['edge_density'] for s in sigs_list])),
-        'lap_var':      float(np.mean([s['lap_var']      for s in sigs_list])),
-    }
-
-
-def _aggregate_for_detection(sigs_list: list[dict]) -> dict:
-    """Aggregate cho DETECTION — robust với landmark drift:
-       - Hist + skin: dùng MEAN (color-based, smoother)
-       - Edge + lap_var: dùng MIN (texture-based, worst-case = most suspicious)
-    """
-    hist = np.mean([s['hist'] for s in sigs_list], axis=0).astype(np.float32)
-    return {
-        'hist':         hist,
-        'skin_ratio':   float(np.mean([s['skin_ratio']  for s in sigs_list])),
-        'edge_density': float(min([s['edge_density'] for s in sigs_list])),
-        'lap_var':      float(min([s['lap_var']      for s in sigs_list])),
+        'hist':       hist,
+        'skin_ratio': float(np.mean([s['skin_ratio'] for s in sigs_list])),
     }
 
 
@@ -160,31 +113,23 @@ def _aggregate_for_detection(sigs_list: list[dict]) -> dict:
 
 @dataclass
 class PatchBaseline:
-    """Baseline + adaptive threshold cho 1 patch (mũi hoặc miệng)."""
+    """Baseline + ngưỡng cho 1 patch (mũi hoặc miệng)."""
     hist: np.ndarray
     skin_ratio: float
-    edge_density: float
-    lap_var: float
-    hist_threshold: float       # corr dưới mức này → vote bị che
-    skin_min_ratio: float       # skin_ratio dưới mức này → vote bị che
-    edge_min_density: float     # edge_density dưới mức này → vote bị che
-    lap_var_min: float          # lap_var dưới mức này → vote bị che
+    hist_threshold: float    # corr dưới mức này → vote bị che
+    skin_min_ratio: float    # skin_ratio dưới mức này → vote bị che
 
 
 @dataclass
 class CheckResult:
     """Kết quả 1 frame check."""
-    occluded: bool                  # quyết định cuối sau vote
+    occluded: bool
     nose_hist_corr: float
     mouth_hist_corr: float
     nose_skin_ratio: float
     mouth_skin_ratio: float
-    nose_edge_density: float
-    mouth_edge_density: float
-    nose_lap_var: float
-    mouth_lap_var: float
-    nose_votes_for_occluded: int    # 0..4
-    mouth_votes_for_occluded: int   # 0..4
+    nose_votes_for_occluded: int    # 0..2
+    mouth_votes_for_occluded: int   # 0..2
 
     @property
     def total_votes(self) -> int:
@@ -194,22 +139,19 @@ class CheckResult:
 # ---------- main detector ----------
 
 class OcclusionDetector:
-    """Multi-signal detector + calibration quality gating + conservative update."""
+    """Phát hiện che mũi/miệng dựa trên skin-ratio + histogram (bảo thủ)."""
 
     def __init__(self):
         self.nose: Optional[PatchBaseline]  = None
         self.mouth: Optional[PatchBaseline] = None
         self.is_ready                       = False
-        self.calibration_quality            = 0.0   # 0..1
+        self.calibration_quality            = 0.0
         self.calibration_message            = ""
         self._samples_nose: list[dict]      = []
         self._samples_mouth: list[dict]     = []
-        # Theo dõi thời gian từ alert cuối — để không update baseline khi
-        # vừa trong trạng thái alert.
         self._frames_since_last_alert       = 10**9
 
     def reset(self):
-        """Reset toàn bộ để re-calibrate."""
         self.nose = None
         self.mouth = None
         self.is_ready = False
@@ -220,31 +162,21 @@ class OcclusionDetector:
         self._frames_since_last_alert = 10**9
 
     def add_calibration_sample(self, frame, landmarks, w, h):
-        """Mỗi frame:
-        - Nose: 1 landmark (NOSE_TIP) → 1 sample
-        - Mouth: 3 landmark (upper/center/lower lip) → aggregate = AVG → 1 sample
-        """
         if self.is_ready:
             return
-
-        # Nose
         for idx in NOSE_LANDMARK_INDICES:
             patch = extract_patch(frame, landmarks[idx], w, h)
             if patch is not None:
                 self._samples_nose.append(compute_signals(patch))
-
-        # Mouth: aggregate multi-landmark with AVG (capture typical face state)
         mouth_patch_sigs = []
         for idx in MOUTH_LANDMARK_INDICES:
             patch = extract_patch(frame, landmarks[idx], w, h)
             if patch is not None:
                 mouth_patch_sigs.append(compute_signals(patch))
         if mouth_patch_sigs:
-            agg = _aggregate_avg(mouth_patch_sigs)
-            self._samples_mouth.append(agg)
+            self._samples_mouth.append(_aggregate(mouth_patch_sigs))
 
     def finalize_calibration(self) -> tuple[bool, str]:
-        """Tính baseline + threshold + quality. Trả về (success, message)."""
         if (len(self._samples_nose) < MIN_CALIB_SAMPLES
                 or len(self._samples_mouth) < MIN_CALIB_SAMPLES):
             msg = (f"Quá ít sample (mũi={len(self._samples_nose)}, "
@@ -274,75 +206,53 @@ class OcclusionDetector:
         mean_hist = hists.mean(axis=0).astype(np.float32)
         cv2.normalize(mean_hist, mean_hist, 0, 1, cv2.NORM_MINMAX)
 
-        # Adaptive hist threshold dựa trên phân bố tự-tương-quan
         self_corrs = np.array(
             [_hist_corr(h.astype(np.float32), mean_hist) for h in hists]
         )
         mean_corr = float(self_corrs.mean())
         std_corr  = float(self_corrs.std())
-        hist_threshold = max(0.30, mean_corr - K_HIST * std_corr)
+        # Kẹp bảo thủ: chỉ kích khi corr tụt rất sâu.
+        hist_threshold = min(HIST_FLOOR_MAX,
+                             max(HIST_FLOOR_MIN, mean_corr - K_HIST * std_corr))
 
         skin_ratios = np.array([s['skin_ratio'] for s in samples])
-        edge_dens   = np.array([s['edge_density'] for s in samples])
-        lap_vars    = np.array([s['lap_var']      for s in samples])
-        mean_skin   = float(skin_ratios.mean())
-        std_skin    = float(skin_ratios.std())
-        mean_edge   = float(edge_dens.mean())
-        mean_lap    = float(lap_vars.mean())
+        mean_skin = float(skin_ratios.mean())
+        std_skin  = float(skin_ratios.std())
 
-        # Critical fail: skin quá thấp → landmark trỏ vào tóc/áo, không phải da
+        # Critical fail: skin quá thấp → landmark trỏ vào tóc/áo, không phải da.
         if mean_skin < 0.15:
             return None, 0.0, (
                 f"❌ Calibration {label} kém: skin chỉ {mean_skin*100:.0f}% — "
                 f"landmark có thể trỏ vào tóc/quần áo, không phải da. "
                 f"Đảm bảo mặt trẻ nằm rõ trong khung, đủ sáng."
             )
-
-        # Critical fail: histogram quá hỗn loạn
+        # Critical fail: histogram quá hỗn loạn.
         if std_corr > 0.25:
             return None, 0.0, (
                 f"❌ Calibration {label} không ổn định: corr stddev={std_corr:.2f} "
                 f"(quá cao). Giữ yên mặt trẻ + tránh đèn nhấp nháy + calibrate lại."
             )
 
-        skin_min    = max(0.05,                  mean_skin * (1.0 - SKIN_DROP_FRAC))
-        # Absolute floor → đảm bảo hand luôn vote dù baseline thấp
-        edge_min    = max(EDGE_ABSOLUTE_FLOOR,   mean_edge * (1.0 - EDGE_DROP_FRAC))
-        lap_var_min = max(LAPVAR_ABSOLUTE_FLOOR, mean_lap  * (1.0 - LAPVAR_DROP_FRAC))
+        skin_min = max(SKIN_ABS_FLOOR, mean_skin * (1.0 - SKIN_DROP_FRAC))
 
-        # Quality 0..1 dựa trên độ ổn định
-        hist_q = max(0.0, min(1.0, 1.0 - std_corr / 0.15))
-        skin_q = max(0.0, min(1.0, 1.0 - std_skin / 0.10))
+        hist_q  = max(0.0, min(1.0, 1.0 - std_corr / 0.15))
+        skin_q  = max(0.0, min(1.0, 1.0 - std_skin / 0.10))
         quality = (hist_q + skin_q) / 2
 
         baseline = PatchBaseline(
             hist=mean_hist,
             skin_ratio=mean_skin,
-            edge_density=mean_edge,
-            lap_var=mean_lap,
             hist_threshold=hist_threshold,
             skin_min_ratio=skin_min,
-            edge_min_density=edge_min,
-            lap_var_min=lap_var_min,
         )
         return baseline, quality, "OK"
 
     def check(self, frame, landmarks, w, h,
-              prev_in_alert: bool, texture_reliable: bool = True) -> Optional[CheckResult]:
-        """Check 1 frame. Trả về None nếu chưa ready hoặc landmark fail.
-
-        prev_in_alert: trạng thái ALERT của frame TRƯỚC. Dùng để biết có an
-        toàn để update baseline không (không update khi vừa ra khỏi alert).
-
-        texture_reliable: False khi cả khung đang MỜ (autofocus hunting / motion
-        blur) — lúc đó edge/lap tụt về 0 không phải vì bị che. Khi False, BỎ 2
-        phiếu texture (edge, lap_var), chỉ tin hist + skin → chống false-positive
-        do mờ. Mặc định True (giữ nguyên hành vi cũ + test cũ).
-        """
+              prev_in_alert: bool) -> Optional[CheckResult]:
+        """Check 1 frame. None nếu chưa ready hoặc landmark fail."""
         if not self.is_ready:
             return None
 
-        # Nose: single landmark
         nose_patches_sigs = []
         for idx in NOSE_LANDMARK_INDICES:
             patch = extract_patch(frame, landmarks[idx], w, h)
@@ -350,10 +260,8 @@ class OcclusionDetector:
                 nose_patches_sigs.append(compute_signals(patch))
         if not nose_patches_sigs:
             return None
-        nose_sigs = _aggregate_for_detection(nose_patches_sigs)
+        nose_sigs = _aggregate(nose_patches_sigs)
 
-        # Mouth: multi-landmark, MIN aggregation cho edge/lap_var → robust với
-        # landmark drift trên bề mặt tay
         mouth_patches_sigs = []
         for idx in MOUTH_LANDMARK_INDICES:
             patch = extract_patch(frame, landmarks[idx], w, h)
@@ -361,41 +269,32 @@ class OcclusionDetector:
                 mouth_patches_sigs.append(compute_signals(patch))
         if not mouth_patches_sigs:
             return None
-        mouth_sigs = _aggregate_for_detection(mouth_patches_sigs)
+        mouth_sigs = _aggregate(mouth_patches_sigs)
 
-        # === Compute correlations ===
         nose_corr  = _hist_corr(nose_sigs['hist'],  self.nose.hist)
         mouth_corr = _hist_corr(mouth_sigs['hist'], self.mouth.hist)
 
-        # === Per-signal votes for "occluded" ===
-        # Mỗi patch có 4 vote: hist / skin / edge / lap_var
-        # Khi cả khung mờ (texture_reliable=False) → edge/lap không đáng tin,
-        # BỎ 2 phiếu này (chống false-positive do autofocus/motion blur).
-        nose_hist_v = nose_corr                  < self.nose.hist_threshold
-        nose_skin_v = nose_sigs['skin_ratio']    < self.nose.skin_min_ratio
-        nose_edge_v = texture_reliable and (nose_sigs['edge_density'] < self.nose.edge_min_density)
-        nose_lap_v  = texture_reliable and (nose_sigs['lap_var']      < self.nose.lap_var_min)
-        nose_votes  = (int(nose_hist_v) + int(nose_skin_v)
-                       + int(nose_edge_v) + int(nose_lap_v))
+        # SKIN-DROP là tín hiệu QUYẾT ĐỊNH: mặt sạch luôn có skin cao (bất kể
+        # sáng/mờ/áp sát), vật che (chăn/gối/khăn/giấy) → skin tụt. Cả 2 ca báo
+        # nhầm cũ (events/162626,162643) đều có skin=1.0 → skin-drop = False →
+        # không báo. histogram chỉ để HIỂN THỊ/log (đặc biệt vùng miệng đổi mạnh
+        # khi bé cử động môi → corr tụt oan, KHÔNG được dùng để quyết định).
+        nose_skin_v = nose_sigs['skin_ratio']  < self.nose.skin_min_ratio
+        nose_hist_v = nose_corr                < self.nose.hist_threshold
+        nose_votes  = int(nose_skin_v) + int(nose_hist_v)
 
-        mouth_hist_v = mouth_corr                 < self.mouth.hist_threshold
-        mouth_skin_v = mouth_sigs['skin_ratio']   < self.mouth.skin_min_ratio
-        mouth_edge_v = texture_reliable and (mouth_sigs['edge_density'] < self.mouth.edge_min_density)
-        mouth_lap_v  = texture_reliable and (mouth_sigs['lap_var']      < self.mouth.lap_var_min)
-        mouth_votes  = (int(mouth_hist_v) + int(mouth_skin_v)
-                        + int(mouth_edge_v) + int(mouth_lap_v))
+        mouth_skin_v = mouth_sigs['skin_ratio'] < self.mouth.skin_min_ratio
+        mouth_hist_v = mouth_corr               < self.mouth.hist_threshold
+        mouth_votes  = int(mouth_skin_v) + int(mouth_hist_v)
 
-        # Final: occluded nếu BẤT KỲ patch nào có ≥2/4 vote
-        occluded = (nose_votes >= 2) or (mouth_votes >= 2)
+        # Che khi BẤT KỲ vùng nào (mũi/miệng) mất màu da.
+        occluded = nose_skin_v or mouth_skin_v
 
-        # === Track frames since alert ===
         if occluded or prev_in_alert:
             self._frames_since_last_alert = 0
         else:
             self._frames_since_last_alert += 1
 
-        # === Conservative baseline update ===
-        # Chỉ update khi: KHÔNG occluded + đã đủ thời gian từ alert cuối + corr rất cao
         can_update = (
             not occluded
             and not prev_in_alert
@@ -413,10 +312,6 @@ class OcclusionDetector:
             mouth_hist_corr=mouth_corr,
             nose_skin_ratio=nose_sigs['skin_ratio'],
             mouth_skin_ratio=mouth_sigs['skin_ratio'],
-            nose_edge_density=nose_sigs['edge_density'],
-            mouth_edge_density=mouth_sigs['edge_density'],
-            nose_lap_var=nose_sigs['lap_var'],
-            mouth_lap_var=mouth_sigs['lap_var'],
             nose_votes_for_occluded=nose_votes,
             mouth_votes_for_occluded=mouth_votes,
         )
@@ -425,6 +320,4 @@ class OcclusionDetector:
         r = BASELINE_UPDATE_RATE
         baseline.hist = ((1 - r) * baseline.hist
                          + r * sigs['hist']).astype(np.float32)
-        baseline.skin_ratio   = (1 - r) * baseline.skin_ratio   + r * sigs['skin_ratio']
-        baseline.edge_density = (1 - r) * baseline.edge_density + r * sigs['edge_density']
-        baseline.lap_var      = (1 - r) * baseline.lap_var      + r * sigs['lap_var']
+        baseline.skin_ratio = (1 - r) * baseline.skin_ratio + r * sigs['skin_ratio']

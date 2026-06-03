@@ -42,14 +42,9 @@ CSV_FIELDS = [
     "session", "clip", "label", "frame_idx",
     "nose_hist_corr", "mouth_hist_corr",
     "nose_skin_ratio", "mouth_skin_ratio",
-    "nose_edge_density", "mouth_edge_density",
-    "nose_lap_var", "mouth_lap_var",
     "nose_votes", "mouth_votes", "occluded_current",
     # Đặc trưng TƯƠNG ĐỐI so với baseline (generalize tốt — dùng cho hướng B)
     "nose_skin_rel", "mouth_skin_rel",
-    "nose_edge_rel", "mouth_edge_rel",
-    "nose_lap_rel", "mouth_lap_rel",
-    "interaction",
 ]
 
 
@@ -111,15 +106,12 @@ def extract_clip(detector, scene, facemesh, clip_path, label, session, writer):
         if not res.multi_face_landmarks:
             continue  # mất mặt → đường face_lost xử lý, không thuộc bộ phát hiện che
         lms = res.multi_face_landmarks[0].landmark
-        cr = detector.check(frame, lms, w, h, prev_in_alert=False,
-                            texture_reliable=not scene.is_blurry)
+        cr = detector.check(frame, lms, w, h, prev_in_alert=False)
         if cr is None:
             continue
         nb, mb = detector.nose, detector.mouth
         ns_rel = _rel(cr.nose_skin_ratio,  nb.skin_ratio)
         ms_rel = _rel(cr.mouth_skin_ratio, mb.skin_ratio)
-        nl_rel = _rel(cr.nose_lap_var,     nb.lap_var)
-        ml_rel = _rel(cr.mouth_lap_var,    mb.lap_var)
         writer.writerow({
             "session": session, "clip": clip_path.name, "label": label,
             "frame_idx": idx,
@@ -127,18 +119,10 @@ def extract_clip(detector, scene, facemesh, clip_path, label, session, writer):
             "mouth_hist_corr": f"{cr.mouth_hist_corr:.4f}",
             "nose_skin_ratio": f"{cr.nose_skin_ratio:.4f}",
             "mouth_skin_ratio": f"{cr.mouth_skin_ratio:.4f}",
-            "nose_edge_density": f"{cr.nose_edge_density:.5f}",
-            "mouth_edge_density": f"{cr.mouth_edge_density:.5f}",
-            "nose_lap_var": f"{cr.nose_lap_var:.2f}",
-            "mouth_lap_var": f"{cr.mouth_lap_var:.2f}",
             "nose_votes": cr.nose_votes_for_occluded,
             "mouth_votes": cr.mouth_votes_for_occluded,
             "occluded_current": int(cr.occluded),
             "nose_skin_rel": f"{ns_rel:.4f}", "mouth_skin_rel": f"{ms_rel:.4f}",
-            "nose_edge_rel": f"{_rel(cr.nose_edge_density, nb.edge_density):.4f}",
-            "mouth_edge_rel": f"{_rel(cr.mouth_edge_density, mb.edge_density):.4f}",
-            "nose_lap_rel": f"{nl_rel:.4f}", "mouth_lap_rel": f"{ml_rel:.4f}",
-            "interaction": f"{max((1-ns_rel)*(1-nl_rel), (1-ms_rel)*(1-ml_rel)):.4f}",
         })
         written += 1
     cap.release()
