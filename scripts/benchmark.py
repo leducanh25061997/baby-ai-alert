@@ -1,6 +1,6 @@
 """Benchmark pipeline — đo FPS thực tế của từng stage để biết bottleneck.
 
-CPU-only: project không hỗ trợ NVIDIA GPU, RK3588 không có CUDA.
+CPU-only: project không hỗ trợ NVIDIA GPU; Raspberry Pi 4 không có NPU/CUDA.
 
 Đo riêng:
   1. Camera read (raw)
@@ -64,9 +64,9 @@ def fmt_stats(name, samples_ms):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source",      default="0")
-    ap.add_argument("--width",       type=int, default=1280)
-    ap.add_argument("--height",      type=int, default=720)
-    ap.add_argument("--fps",         type=int, default=30)
+    ap.add_argument("--width",       type=int, default=640)
+    ap.add_argument("--height",      type=int, default=480)
+    ap.add_argument("--fps",         type=int, default=15)
     ap.add_argument("--frames",      type=int, default=150, help="Số frame benchmark")
     ap.add_argument("--warmup",      type=int, default=10)
     ap.add_argument("--no-yolo",     action="store_true")
@@ -224,9 +224,9 @@ def main():
                   f"thực tế chỉ đạt ~{achievable:.0f} FPS")
             print("   Khuyến nghị: giảm camera FPS xuống bằng giá trị này, hoặc:")
             if yolo is not None and times_yolo and statistics.mean(times_yolo) > 30:
-                print("   - YOLO chiếm > 30ms → tăng YOLO_EVERY, hoặc convert sang RKNN (NPU)")
+                print("   - YOLO chiếm > 30ms → tăng YOLO_EVERY (vd 15), hoặc gắn Coral USB TPU")
             elif times_face and statistics.mean(times_face) > 25:
-                print("   - MediaPipe chậm → giảm resolution xuống 960x540 hoặc 640x480")
+                print("   - MediaPipe chậm → giảm resolution xuống 480x360")
     return 0
 
 

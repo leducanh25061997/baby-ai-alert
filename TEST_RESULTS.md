@@ -4,15 +4,25 @@ Báo cáo các test case đã viết và **đều PASS** tính đến lần ch�
 
 | Module | Số test | Pass | Fail |
 |---|:-:|:-:|:-:|
-| `tests/test_state_machine.py` | 11 | ✅ 11 | 0 |
-| `tests/test_occlusion_detector.py` | 15 | ✅ 15 | 0 |
-| **Tổng** | **26** | **26** | **0** |
+| `tests/test_state_machine.py` | 14 | ✅ 14 | 0 |
+| `tests/test_occlusion_detector.py` | 16 | ✅ 16 | 0 |
+| `tests/test_scene_monitor.py` | 7 | ✅ 7 | 0 |
+| `tests/test_alert_policy.py` | 14 | ✅ 14 | 0 |
+| **Tổng** | **51** | **51** | **0** |
 
 Lệnh chạy lại:
 ```bash
 PYTHONIOENCODING=utf-8 python tests/test_state_machine.py
 PYTHONIOENCODING=utf-8 python tests/test_occlusion_detector.py
+PYTHONIOENCODING=utf-8 python tests/test_scene_monitor.py
+PYTHONIOENCODING=utf-8 python tests/test_alert_policy.py
 ```
+
+> Bổ sung mới:
+> - `test_occlusion_detector`: thêm `test_blur_gate_suppresses_texture_votes` (bỏ phiếu edge/lap khi mờ).
+> - `test_scene_monitor` (7): blur-gate, motion threshold/has_motion, frozen-frame, luma — [src/scene_monitor.py](src/scene_monitor.py).
+> - `test_alert_policy` (14): logic timing thuần tách khỏi main.py — motion-absence,
+>   watchdog (cảnh báo/khôi phục), heartbeat, calibration-reminder — [src/alert_policy.py](src/alert_policy.py).
 
 ---
 
@@ -181,7 +191,7 @@ Yêu cầu gốc: *"Camera liên tục xác nhận sự hiện diện của mũi
 # Trên máy có numpy<2, opencv-python<4.11
 cd baby-ai-alert
 PYTHONIOENCODING=utf-8 python tests/test_state_machine.py
-# 🎉 11/11 test PASS
+# 🎉 14/14 test PASS
 
 PYTHONIOENCODING=utf-8 python tests/test_occlusion_detector.py
 # 🎉 15/15 test PASS
@@ -198,4 +208,4 @@ Test `test_occlusion_detector` dùng **synthetic frames** (numpy arrays) chứ k
 - CI/CD pipeline chạy được trên server không có camera
 - Verify thuật toán độc lập với hardware
 
-Test integration với camera/mediapipe thật → phải chạy thủ công qua `python src/main.py` theo các kịch bản trong [INSTALL.md](INSTALL.md) mục 9.2.
+Test integration với camera/mediapipe thật → phải chạy thủ công qua `python src/main.py` theo các kịch bản trong [INSTALL_PI4.md](INSTALL_PI4.md) §9.2.

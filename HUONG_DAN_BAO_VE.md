@@ -25,13 +25,13 @@
 
 > *Câu mở đầu khi giới thiệu với hội đồng. Học thuộc, nói trơn tru.*
 
-**"Đề tài của em là hệ thống cảnh báo nguy cơ ngạt thở ở trẻ sơ sinh bằng AI, chạy trên máy tính nhúng Orange Pi. Hệ thống dùng camera quan sát trẻ liên tục, dùng MediaPipe để xác định vị trí mũi và miệng, sau đó dùng 4 tín hiệu hình ảnh để bỏ phiếu xem mũi/miệng có bị vật lạ che hay không. Nếu bị che quá 15 giây thì gửi cảnh báo về Telegram cho cha mẹ kèm ảnh chụp tại thời điểm đó. Toàn bộ chạy CPU-only trên Orange Pi 5, không cần GPU, hoạt động real-time khoảng 10-12 khung hình mỗi giây."**
+**"Đề tài của em là hệ thống cảnh báo nguy cơ ngạt thở ở trẻ sơ sinh bằng AI, chạy trên máy tính nhúng Raspberry Pi 4. Hệ thống dùng camera quan sát trẻ liên tục, dùng MediaPipe để xác định vị trí mũi và miệng, sau đó dùng 4 tín hiệu hình ảnh để bỏ phiếu xem mũi/miệng có bị vật lạ che hay không. Nếu bị che quá 15 giây thì gửi cảnh báo về Telegram cho cha mẹ kèm ảnh chụp tại thời điểm đó. Toàn bộ chạy CPU-only trên Raspberry Pi 4, không cần GPU, hoạt động real-time khoảng 6-8 khung hình mỗi giây ở độ phân giải 640×480."**
 
 ### 4 điểm mạnh để khoe ngay:
-1. **Real-time trên thiết bị nhúng giá rẻ** (~2 triệu VND) — không cần cloud, không cần GPU
+1. **Real-time trên thiết bị nhúng giá rẻ** (Raspberry Pi 4 ~1.5 triệu VND) — không cần cloud, không cần GPU
 2. **Multi-signal voting** — 4 tín hiệu bỏ phiếu chéo, không phụ thuộc 1 model AI duy nhất → robust
 3. **Có state machine + grace period** — tránh false alert khi mặt bị che trong tích tắc
-4. **Có YOLO phân biệt "rời khung" vs "bị phủ kín"** — quan trọng để không cảnh báo nhầm
+4. **Thiết kế safety-first + YOLO hỗ trợ** — khi mất mặt thì ưu tiên cảnh báo (thà báo nhầm còn hơn bỏ lọt ngạt thở); YOLO giúp bắt đầu đếm khi thấy người và im lặng khi khung trống
 
 ---
 
@@ -45,14 +45,18 @@ baby-ai-alert/
 ├── src/                              ← "Khu vực chính" — code chạy app
 │   ├── main.py                       ← Phòng khách: tiếp nhận camera, điều phối
 │   ├── state_machine.py              ← Phòng não: quyết định khi nào alert
-│   └── occlusion_detector.py         ← Phòng mắt: nhìn và phân tích pixel
+│   ├── occlusion_detector.py         ← Phòng mắt: nhìn và phân tích pixel mũi/miệng
+│   ├── scene_monitor.py              ← Phòng cảm biến: blur-gate + motion + luma
+│   └── alert_policy.py               ← Phòng đồng hồ: timing bất động/watchdog/heartbeat/nhắc
 │
-├── tests/                            ← Kho kiểm thử (29 unit test)
-│   ├── test_state_machine.py         (11 test cho FSM)
-│   └── test_occlusion_detector.py    (14 test cho detector)
+├── tests/                            ← Kho kiểm thử (51 unit test)
+│   ├── test_state_machine.py         (14 test cho FSM)
+│   ├── test_occlusion_detector.py    (16 test cho detector)
+│   ├── test_scene_monitor.py         (7 test cho blur/motion/luma)
+│   └── test_alert_policy.py          (14 test cho timing policy)
 │
 ├── scripts/                          ← Tủ công cụ
-│   ├── install_opi.sh                ← Tự động cài trên Orange Pi
+│   ├── install_pi4.sh                ← Tự động cài trên Raspberry Pi 4
 │   ├── fix_env.sh / fix_env.ps1      ← Sửa môi trường Python bị lỗi
 │   ├── test_webcam.py                ← Test camera
 │   └── benchmark.py                  ← Đo FPS pipeline
@@ -61,7 +65,7 @@ baby-ai-alert/
 │
 ├── yolov8n.pt                        ← Model AI nhận diện người (6MB)
 ├── requirements.txt                  ← Danh sách thư viện cần cài
-└── INSTALL.md                        ← Hướng dẫn cài trên Orange Pi
+└── INSTALL_PI4.md                    ← Hướng dẫn cài trên Raspberry Pi 4
 ```
 
 ### 3 file source quan trọng nhất — em phải hiểu rõ:
@@ -74,7 +78,7 @@ baby-ai-alert/
 
 ### Tại sao chia 3 file mà không gộp 1?
 
-**Câu trả lời chuẩn**: *"Em chia theo nguyên tắc Separation of Concerns. State machine không cần biết về OpenCV hay MediaPipe, nó chỉ nhận input boolean và quyết định state. Detector không cần biết về Telegram hay camera. Tách ra giúp em viết unit test cho state machine mà không cần camera thật — em có 29 test pass 100%. Nếu mai sau đổi từ MediaPipe sang model khác, em chỉ cần thay detector, state machine không phải đụng."*
+**Câu trả lời chuẩn**: *"Em chia theo nguyên tắc Separation of Concerns. State machine không cần biết về OpenCV hay MediaPipe, nó chỉ nhận input boolean và quyết định state. Detector không cần biết về Telegram hay camera. Tách ra giúp em viết unit test cho state machine mà không cần camera thật — em có 51 test pass 100%. Nếu mai sau đổi từ MediaPipe sang model khác, em chỉ cần thay detector, state machine không phải đụng."*
 
 ---
 
@@ -86,7 +90,7 @@ baby-ai-alert/
 
 ```
 ┌─────────────────┐
-│  Camera USB     │  30 FPS, 1280x720
+│  Camera USB     │  15 FPS, 640x480
 │  (Logitech)     │
 └────────┬────────┘
          ▼
@@ -95,7 +99,7 @@ baby-ai-alert/
   └──────┬──────┘
          ▼
   ┌──────────────────────────┐
-  │ MediaPipe FaceMesh       │  ~25-40ms
+  │ MediaPipe FaceMesh       │  ~60-90ms
   │ → tìm 468 landmark trên  │
   │   khuôn mặt              │
   └────────┬─────────────────┘
@@ -109,7 +113,7 @@ baby-ai-alert/
 │ Detector    │ │ YOLO check     │
 │ 4-signal    │ │ "có người      │
 │ voting      │ │  trong khung?" │
-│             │ │  ~15ms (CPU)   │
+│             │ │  ~40-80ms(CPU) │
 │ ~6-12ms     │ └────────┬───────┘
 └──────┬──────┘          │
        │                 │
@@ -139,8 +143,8 @@ baby-ai-alert/
 
 ### Diễn giải từng bước (cho slide):
 
-1. **Đọc camera** (~3ms): OpenCV đọc 1 khung hình 1280×720 từ webcam USB.
-2. **MediaPipe FaceMesh** (~30ms): Google MediaPipe phát hiện 468 điểm landmark trên khuôn mặt (mắt, mũi, miệng, cằm...). Em chỉ dùng 4 điểm: 1 ở mũi (`NOSE_TIP=4`), 3 ở miệng (lip trên 13, giữa 14, lip dưới 17).
+1. **Đọc camera** (~3ms): OpenCV đọc 1 khung hình 640×480 từ webcam USB.
+2. **MediaPipe FaceMesh** (~60-90ms trên Pi 4): Google MediaPipe phát hiện 468 điểm landmark trên khuôn mặt (mắt, mũi, miệng, cằm...). Em chỉ dùng 4 điểm: 1 ở mũi (`NOSE_TIP=4`), 3 ở miệng (lip trên 13, giữa 14, lip dưới 17).
 3. **Cắt patch quanh landmark** (~1ms): mỗi điểm landmark, em cắt 1 ô vuông 70×70 pixel xung quanh. Đó là khu vực mũi/miệng cần giám sát.
 4. **Tính 4 tín hiệu cho mỗi patch** (~8ms):
    - Histogram HSV (phân bố màu)
@@ -158,7 +162,7 @@ baby-ai-alert/
 
 | Thông số | Giá trị | Ý nghĩa |
 |---|---|---|
-| **FPS pipeline** | 10-12 FPS | Tốc độ thực tế trên Orange Pi 5 |
+| **FPS pipeline** | 6-8 FPS | Tốc độ thực tế trên Raspberry Pi 4 (640×480) |
 | **Ngưỡng alert** | 15 giây | Bị che liên tục bao lâu thì cảnh báo |
 | **Calibration** | 5 giây | Thời gian học baseline khuôn mặt trẻ |
 | **Smoother** | 7/10 frame | Lọc nhiễu trước state machine |
@@ -172,7 +176,7 @@ baby-ai-alert/
 
 **Cách giải thích cho hội đồng**:
 
-> *"MediaPipe FaceMesh là model học sâu của Google, được train trên hàng triệu khuôn mặt. Em đưa 1 ảnh vào, nó trả về 468 điểm 3D đánh dấu cấu trúc khuôn mặt. Em chỉ quan tâm 4 điểm: đầu mũi và 3 điểm trên miệng. Em chọn MediaPipe vì nó đã được tối ưu cho thiết bị di động và nhúng — chạy 30ms/frame trên CPU Orange Pi, đủ nhanh cho real-time."*
+> *"MediaPipe FaceMesh là model học sâu của Google, được train trên hàng triệu khuôn mặt. Em đưa 1 ảnh vào, nó trả về 468 điểm 3D đánh dấu cấu trúc khuôn mặt. Em chỉ quan tâm 4 điểm: đầu mũi và 3 điểm trên miệng. Em chọn MediaPipe vì nó đã được tối ưu cho thiết bị di động và nhúng — chạy ~60-90ms/frame trên CPU Raspberry Pi 4 ở 640×480, đủ nhanh cho real-time."*
 
 **Tại sao không tự train model?**
 > *"Em không có dataset đủ lớn và thời gian training. MediaPipe là solution mature, free, chính xác >95% trên benchmark phổ thông. Đề tài tập trung vào KỸ THUẬT PHÁT HIỆN BỊ CHE chứ không phải training face detector."*
@@ -263,17 +267,18 @@ class SmoothingBuffer:
 
 **Tại sao có YOLO?**
 
-> *"YOLO không phát hiện bị che — đó là việc của detector chính. YOLO trả lời 1 câu hỏi rất cụ thể: 'KHÔNG thấy mặt nữa rồi, là trẻ bị phủ kín, hay đã rời khung?' Đây là 2 kịch bản KHÁC NHAU TUYỆT ĐỐI:*
-> - *Trẻ rời khung → KHÔNG alert (cha mẹ đang bế trẻ chơi)*
-> - *Trẻ bị phủ kín → ALERT GẤP (chăn lấn đầu nguy hiểm)"*
+> *"YOLO không phát hiện bị che — đó là việc của detector chính. YOLO là bộ check PHỤ cho tình huống KHÔNG thấy mặt. Nhưng em theo nguyên tắc SAFETY-FIRST: khi đang thấy mặt mà mặt biến mất → mặc định coi là NGHI BỊ PHỦ KÍN và đếm để báo, KHÔNG để YOLO=False hủy cảnh báo. Vì sao? Camera top-down, trẻ nằm bị chăn phủ → YOLO (train trên người đứng) hay sót → nếu tin 'YOLO không thấy = rời khung' thì BỎ LỌT ca ngạt thở thật.*
+> *YOLO chỉ giúp 2 việc an toàn:*
+> - *YOLO thấy CÓ người mà không thấy mặt (trẻ chưa từng track mặt) → BẮT ĐẦU đếm.*
+> - *Khung trống, CHƯA TỪNG thấy mặt → im lặng (NO_FACE), không báo nhầm khi chưa đặt trẻ vào."*
 >
-> *"Nếu chỉ có MediaPipe, 2 trường hợp này NHÌN GIỐNG NHAU (không thấy mặt). YOLO YOLOv8n nhận diện thân người → vẫn có thân thì là đang ở trong khung nhưng bị phủ. Đây là bộ check thứ 2."*
+> *"Đánh đổi em chấp nhận: nếu cha mẹ bế trẻ ra khỏi khung >15s thì vẫn có 1 cảnh báo nhầm — em ưu tiên KHÔNG BAO GIỜ MISS ngạt thở hơn là tránh vài false alarm."*
 
 **Tại sao YOLOv8n (nano) mà không phải s/m/l?**
-> *"Nano là phiên bản nhỏ nhất, 6MB, chạy CPU ~15ms/frame. s/m/l chậm hơn nhiều, không real-time được trên Orange Pi. Em không cần độ chính xác cao, chỉ cần biết 'có thân người' hay không."*
+> *"Nano là phiên bản nhỏ nhất, 6MB, nhẹ nhất cho CPU. s/m/l chậm hơn nhiều, không real-time được trên Raspberry Pi 4 (không có NPU). Em không cần độ chính xác cao, chỉ cần biết 'có thân người' hay không."*
 
 **Tại sao không chạy YOLO mỗi frame?**
-> *"Để tối ưu CPU. Em set `YOLO_EVERY=5` — chỉ chạy 1 lần mỗi 5 frame, cache kết quả. Lý do: phân biệt 'rời khung' vs 'bị phủ' không cần real-time tới 30 lần/giây — 6 lần/giây là dư."*
+> *"Để tối ưu CPU. Trên Pi 4 em set `YOLO_EVERY=10` — chỉ chạy 1 lần mỗi 10 frame, cache kết quả. Lý do: phân biệt 'rời khung' vs 'bị phủ' không cần real-time — 1-2 lần/giây là dư."*
 
 ---
 
@@ -293,11 +298,11 @@ A: *"Cha mẹ trẻ sơ sinh đang nuôi con dưới 1 tuổi. Đặc biệt h�
 
 **Q3. Tại sao em chọn đề tài này?**
 
-A: *"Em thấy thị trường có nhiều baby monitor truyền thống chỉ phát âm thanh và video, không có AI cảnh báo nguy hiểm. Sản phẩm AI thì đắt (Owlet ~5 triệu/cái, cần subscription cloud). Em muốn làm 1 phiên bản tự host trên thiết bị nhúng giá rẻ, không cần internet liên tục, dữ liệu không lên cloud — bảo mật riêng tư."*
+A: *"Em thấy thị trường có nhiều baby monitor truyền thống chỉ phát âm thanh và video, không có AI cảnh báo nguy hiểm. Sản phẩm AI thì đắt (Owlet ~5 triệu/cái, cần subscription cloud). Em muốn làm 1 phiên bản tự host trên thiết bị nhúng giá rẻ (Raspberry Pi 4), không cần internet liên tục, dữ liệu không lên cloud — bảo mật riêng tư."*
 
 **Q4. Đề tài em có gì khác biệt so với sản phẩm thương mại?**
 
-A: *"3 điểm khác biệt: (1) Chạy 100% local trên Orange Pi, không cần cloud → không lo lộ video con. (2) Multi-signal voting thay vì 1 model AI duy nhất → robust hơn với edge case như tay che mặt. (3) Mã nguồn mở, cha mẹ kỹ thuật có thể tự deploy, tự sửa threshold."*
+A: *"3 điểm khác biệt: (1) Chạy 100% local trên Raspberry Pi 4, không cần cloud → không lo lộ video con. (2) Multi-signal voting thay vì 1 model AI duy nhất → robust hơn với edge case như tay che mặt. (3) Mã nguồn mở, cha mẹ kỹ thuật có thể tự deploy, tự sửa threshold."*
 
 **Q5. Đâu là điểm khó nhất khi làm đồ án?**
 
@@ -315,19 +320,19 @@ A: *"3 lý do: (1) Library AI Python phong phú nhất (OpenCV, MediaPipe, PyTor
 
 **Q8. <u>Tại sao chọn MediaPipe mà không YOLO-Face hay dlib?</u>**
 
-A: *"MediaPipe FaceMesh cho 468 landmark 3D, ổn định, tốc độ cao trên CPU ARM (~30ms). dlib chỉ có 68 landmark 2D, chậm hơn. YOLO-Face không cho landmark precision, chỉ cho bounding box."*
+A: *"MediaPipe FaceMesh cho 468 landmark 3D, ổn định, tốc độ tốt trên CPU ARM (~60-90ms ở 480p trên Pi 4). dlib chỉ có 68 landmark 2D, chậm hơn. YOLO-Face không cho landmark precision, chỉ cho bounding box."*
 
 **Q9. Tại sao YOLOv8 mà không phải YOLOv5 hay v7?**
 
-A: *"v8 là phiên bản mới nhất (2023), accuracy cao hơn v5/v7 cùng số params, có ultralytics support tốt. Quan trọng nhất là v8n có ONNX/RKNN export dễ — em có roadmap convert sang RKNN để chạy NPU sau này."*
+A: *"v8 là phiên bản mới nhất (2023), accuracy cao hơn v5/v7 cùng số params, có ultralytics support tốt. Quan trọng nhất là v8n có ONNX/TFLite export dễ — em có roadmap convert sang TFLite int8 cho Google Coral USB TPU để tăng tốc trên Pi 4 sau này."*
 
-**Q10. Tại sao Orange Pi mà không Raspberry Pi?**
+**Q10. Tại sao Raspberry Pi 4?**
 
-A: *"Orange Pi 5 dùng chip RK3588 — 8 core ARM Cortex-A76 + A55, NPU 6 TOPS, mạnh hơn Raspberry Pi 4 khoảng 2-3 lần CPU. Giá tương đương (~2 triệu). Đặc biệt NPU 6 TOPS sau này em có thể convert YOLO sang RKNN để tăng tốc ~10x. Raspberry Pi 5 cũng có nhưng đắt hơn và không có NPU mạnh."*
+A: *"Em chọn Raspberry Pi 4 vì 3 lý do: (1) Hệ sinh thái phần mềm trưởng thành nhất trong các board nhúng ARM — Raspberry Pi OS 64-bit cài MediaPipe/OpenCV/PyTorch ổn định, cộng đồng lớn, tài liệu nhiều → ít rủi ro khi triển khai. (2) Nhân Cortex-A72 (out-of-order) cho hiệu năng đơn luồng tốt cho MediaPipe — phần nặng nhất của pipeline. (3) Giá rẻ, dễ mua. Em đã hạ độ phân giải xuống 640×480 và giãn YOLO để giữ ≥6 FPS trên CPU. Pi 4 không có NPU; nếu cần tăng tốc YOLO thì gắn Google Coral USB TPU — nhưng hiện CPU đã đủ."*
 
 **Q11. Project có dùng GPU không?**
 
-A: *"Không. Project chạy 100% CPU. Orange Pi không có GPU NVIDIA. Em đã pin torch<2.4 trong requirements vì torch >=2.4 vô tình pull về nvidia-cudnn 433MB trên Linux dù không dùng — gây lỗi 'no space left on device' khi cài. Hệ thống thiết kế CPU-only ngay từ đầu."*
+A: *"Không. Project chạy 100% CPU. Raspberry Pi 4 không có GPU NVIDIA cũng không có NPU. Em đã pin torch<2.4 trong requirements vì torch >=2.4 vô tình pull về nvidia-cudnn 433MB trên Linux dù không dùng — gây lỗi 'no space left on device' khi cài. Hệ thống thiết kế CPU-only ngay từ đầu."*
 
 **Q12. Em có nghĩ đến chạy trên cloud không?**
 
@@ -420,7 +425,7 @@ A: *"Không cảnh báo ngay. Em có grace period 1.5 giây — mặt mất ch�
 
 **Q31. <u>Làm sao phân biệt 'trẻ rời khung' vs 'bị phủ kín mặt'? Cả hai đều không thấy mặt.</u>**
 
-A: *"Đây chính là vai trò của YOLO. Khi không thấy mặt, em hỏi YOLO 'có người trong khung không?'. Nếu YOLO trả lời KHÔNG → trẻ ra ngoài → state NO_FACE, không alert. Nếu YOLO trả lời CÓ → trẻ vẫn đó nhưng mặt bị che → tiếp tục đếm, alert sau 15s."*
+A: *"Em ưu tiên SAFETY-FIRST. Khi đang thấy mặt mà mặt đột ngột biến mất, em coi đó là NGHI BỊ PHỦ KÍN và đếm 15s rồi báo. Vì sao không tin tuyệt đối vào YOLO để nói 'rời khung'? Vì camera đặt top-down xuống cũi, YOLO train chủ yếu trên người đứng/ngồi → trẻ nằm bị chăn phủ thì YOLO HAY trả 'không có người' sai → nếu tin nó thì em BỎ LỌT đúng ca ngạt thở nguy hiểm nhất. Em chấp nhận báo nhầm khi cha mẹ bế trẻ đi còn hơn miss. YOLO đóng vai phụ: nếu KHÔNG thấy mặt mà YOLO khẳng định CÓ người (trẻ chưa từng được track mặt nhưng nằm trong khung) → bắt đầu đếm; nếu khung trống chưa từng thấy mặt → im lặng (NO_FACE)."*
 
 **Q32. Có thể vào ALERT mà không cần đếm 15 giây không?**
 
@@ -430,7 +435,7 @@ A: *"Không. Đếm 15s là cơ chế lọc cuối cùng để tránh false aler
 
 A: *"Không. Em có cooldown 60 giây — 1 alert đã gửi trong 60s vừa qua → không gửi nữa. Cộng với `alert_sent=True` flag, mỗi 'chu kỳ' bị che chỉ gửi 1 alert."*
 
-### E. Câu hỏi về Telegram (5 câu)
+### E. Câu hỏi về Telegram (6 câu)
 
 **Q34. Tại sao Telegram mà không SMS?**
 
@@ -442,11 +447,15 @@ A: *"Caption gồm: thời gian alert, số giây bị che, lý do trigger (FACE
 
 **Q36. Em xử lý lúc Telegram fail (mất mạng) như thế nào?**
 
-A: *"Em wrap trong try-except, log lỗi ra console nhưng KHÔNG crash pipeline. Đồng thời event đã lưu local trong folder events/ — cha mẹ vẫn có bằng chứng dù tin không đến."*
+A: *"3 lớp: (1) Em wrap trong try-except, log lỗi nhưng KHÔNG crash pipeline. (2) Em có cơ chế **retry với backoff** — mỗi alert thử lại nhiều lần (0→2→5→10→20 giây) nên mạng chập chờn vẫn gửi được. (3) Event đã lưu local trong folder events/ — cha mẹ vẫn có bằng chứng dù tin không đến."*
 
 **Q37. Telegram chạy đồng bộ trong pipeline có chậm không?**
 
 A: *"Không, em chạy trong thread riêng. `_dispatch_alert()` snapshot frame rồi `threading.Thread` gọi `asyncio.run(send_alert(...))`. Pipeline tiếp tục chạy mượt, không bị block bởi network call."*
+
+**Q37b. <u>Khi Pi vừa khởi động (autostart), mạng WiFi chưa kịp lên thì alert có bị trượt không?</u>**
+
+A: *"Em xử lý đúng vấn đề này — vì lúc mới boot, WiFi associate + DHCP + DNS mất 15–30 giây nữa mới xong. Em làm 2 việc: (1) Ở phía systemd, service đặt `After=network-online.target` để chờ mạng THẬT SỰ lên rồi mới chạy. (2) Ở phía app, lúc khởi động em chạy 1 thread nền **warm-up** — gọi thử `getMe` lặp lại tới khi được, vừa xác thực token vừa làm ấm DNS/kết nối; cộng với retry/backoff khi gửi. Nhờ vậy alert đầu tiên sau khi boot gửi gần như tức thì thay vì bị trượt. Trước đây em từng gặp lỗi 'autostart rất lâu mới gửi được' và đã fix đúng theo 2 hướng này."*
 
 **Q38. Có thể đổi sang dịch vụ khác không?**
 
@@ -456,13 +465,15 @@ A: *"Có. Em đã thiết kế abstraction tốt — class `BabyMonitorV5.send_a
 
 **Q39. FPS thực tế bao nhiêu?**
 
-A: *"Trên Orange Pi 5 CPU-only: ~10-12 FPS end-to-end ở 1280×720. Breakdown: MediaPipe 25-40ms, multi-signal detector 6-12ms, YOLO (chạy mỗi 5 frame, amortized) 15-30ms, camera read 3ms. Tổng ~80-100ms/frame. State machine chỉ cần ≥6 FPS để hoạt động đúng → 10-12 FPS dư an toàn."*
+A: *"Trên Raspberry Pi 4 CPU-only: ~6-8 FPS end-to-end ở 640×480. Breakdown: MediaPipe 60-90ms, multi-signal detector 6-12ms, YOLO (chạy mỗi 10 frame, amortized) ~15-25ms, camera read 3ms. Tổng ~120-180ms/frame. State machine chỉ cần ≥6 FPS để hoạt động đúng → 6-8 FPS là vừa đủ an toàn (lý do em hạ xuống 480p thay vì 720p)."*
 
 **Q40. Em test đề tài thế nào? Có bao nhiêu test case?**
 
-A: *"Em có 29 unit test, chia 2 file:*
-- *test_state_machine.py — 11 test cho FSM: kịch bản safe flow, alert firing, recovery, grace period, YOLO override...*
-- *test_occlusion_detector.py — 14 test cho detector: calibration thành công/thất bại, blanket detection, hand detection, stability under landmark drift...*
+A: *"Em có 51 unit test, chia 4 file:*
+- *test_state_machine.py — 14 test cho FSM: kịch bản safe flow, alert firing, recovery, grace period, YOLO override...*
+- *test_occlusion_detector.py — 16 test cho detector: calibration, blanket/hand detection, blur-gate, stability under landmark drift...*
+- *test_scene_monitor.py — 7 test cho blur-gate + motion + frozen-frame + luma (watchdog).*
+- *test_alert_policy.py — 14 test cho logic timing: motion-absence, watchdog cảnh báo/khôi phục, heartbeat, nhắc hiệu chỉnh.*
 *Đặc biệt em có test test_check_on_hand_alerts để đảm bảo case tay che mặt — đây là failure mode khó nhất em đặc biệt verify."*
 
 **Q41. Tỷ lệ false positive / false negative bao nhiêu?**
@@ -471,20 +482,21 @@ A: *"Em test với 4 kịch bản thực tế:*
 - *Mặt sạch 30 phút → 0 false alert (FP rate ~0%).*
 - *Tay che mặt 20 giây → alert đúng (TP=100%).*
 - *Chăn phủ kín 20 giây → alert đúng (TP=100%).*
-- *Rời khung 1 phút → KHÔNG alert (TN=100%).*
-*Đây là test định tính chứ chưa có dataset chuẩn để báo cáo định lượng — đây là điểm em sẽ improve trong tương lai."*
+- *Khung trống chưa đặt trẻ → KHÔNG alert (TN=100%).*
+- *Rời khung NGẮN (<15s) rồi quay lại → KHÔNG alert (chưa đủ ngưỡng).*
+*Lưu ý trung thực: nếu rời khung >15s sau khi đã thấy mặt thì em CỐ Ý vẫn báo (`Mất hoàn toàn khuôn mặt`) — đây là đánh đổi safety-first, không phải false negative (xem Q31). Đây là test định tính, chưa có dataset chuẩn để báo cáo định lượng — điểm em sẽ improve."*
 
 **Q42. <u>Nếu hội đồng hỏi "tại sao không có dataset chuẩn?"</u>**
 
 A: *"Vì không có public dataset cho bài toán 'mũi/miệng trẻ bị che'. Em không thể tạo dataset thật (vấn đề đạo đức + an toàn trẻ). Em đang lên kế hoạch hợp tác với khoa Nhi để thu thập video giám sát trẻ ngủ làm baseline dataset."*
 
-**Q43. Em có chạy thực tế trên Orange Pi chưa?**
+**Q43. Em có chạy thực tế trên Raspberry Pi 4 chưa?**
 
-A: *"Em đã cài và chạy thực tế trên Orange Pi 3B. INSTALL.md ghi rõ mọi bước. Em cũng đã viết script tự động install_opi.sh xử lý các edge case như /tmp tmpfs đầy, torch 2.4+ pull nvidia_cudnn không cần. Một sản phẩm production-ready."*
+A: *"Em đã cài và chạy thực tế trên Raspberry Pi 4. INSTALL_PI4.md ghi rõ mọi bước. Em cũng đã viết script tự động install_pi4.sh xử lý các edge case như torch 2.4+ pull nvidia_cudnn không cần, numpy/opencv mismatch. Một sản phẩm production-ready với systemd autostart."*
 
 **Q44. Em có tài liệu hướng dẫn không?**
 
-A: *"Có 2 file MD lớn: INSTALL.md (~700 dòng) hướng dẫn deploy từ A-Z trên Orange Pi gồm flash OS, cài deps, cấu hình, systemd service, troubleshooting. README chính tóm tắt project."*
+A: *"File MD lớn INSTALL_PI4.md hướng dẫn deploy từ A-Z trên Raspberry Pi 4 gồm flash Raspberry Pi OS 64-bit, cài deps, cấu hình, systemd service, troubleshooting. Kèm TEST_RESULTS.md ghi 51 test case và tài liệu bảo vệ này."*
 
 ### G. Câu hỏi về tương lai (3 câu)
 
@@ -495,13 +507,13 @@ A: *"Em thẳng thắn: (1) Ánh sáng yếu/ban đêm chưa test kỹ — Media
 **Q46. Hướng phát triển tiếp theo là gì?**
 
 A: *"3 hướng cụ thể:*
-- *Convert YOLO sang RKNN để chạy NPU 6 TOPS của RK3588 → tăng tốc ~10x.*
+- *Gắn Google Coral USB TPU + convert YOLO sang TFLite Edge TPU để tăng tốc person detection trên Pi 4 (Pi 4 không có NPU sẵn).*
 - *Thêm IR camera để giám sát ban đêm.*
-- *Tích hợp relay 4 kênh (em đã có sẵn module): kích còi báo động, đèn cảnh báo khi alert. INSTALL.md mục 12 đã có thiết kế nháp."*
+- *Tích hợp relay 4 kênh (em đã có sẵn module): kích còi báo động, đèn cảnh báo khi alert. INSTALL_PI4.md §12 đã có thiết kế nháp."*
 
 **Q47. Có thể thương mại hóa không?**
 
-A: *"Có tiềm năng. Chi phí phần cứng (~2.5 triệu Orange Pi 5 + camera + relay) bằng 1/2 sản phẩm thương mại như Owlet. Mô hình: bán phần cứng + free app, không bắt subscription cloud. Nhưng em cần làm thêm: chứng nhận y tế, hardening case, dev mobile app cho cha mẹ."*
+A: *"Có tiềm năng. Chi phí phần cứng (~2.5 triệu: Raspberry Pi 4 + camera + relay + case + nguồn) rẻ hơn nhiều sản phẩm thương mại như Owlet. Mô hình: bán phần cứng + free app, không bắt subscription cloud. Nhưng em cần làm thêm: chứng nhận y tế, hardening case, dev mobile app cho cha mẹ."*
 
 ### H. Câu hỏi technical sâu (3 câu)
 
@@ -531,7 +543,7 @@ A: *"Vì em tối ưu được pipeline:*
 
 ```bash
 # Ngày trước hôm bảo vệ: test demo flow hoàn chỉnh
-cd ~/Documents/baby-ai-alert
+cd ~/baby-ai-alert
 source venv/bin/activate
 HEADLESS=0 python src/main.py
 ```
@@ -552,10 +564,10 @@ Kiểm tra:
 
 Vẽ trên slide:
 ```
-[Camera USB] → [Orange Pi 5: MediaPipe + 4-signal Detector + YOLO + FSM] → [Telegram]
+[Camera USB] → [Raspberry Pi 4: MediaPipe + 4-signal Detector + YOLO + FSM] → [Telegram]
 ```
 
-> *"Em dùng Orange Pi 5 chip RK3588, USB webcam Logitech, và 1 module relay 4 kênh. Phần mềm em viết bằng Python, tách rõ 3 module: detector chuyên về phân tích pixel, state machine ra quyết định, main module điều phối."*
+> *"Em dùng Raspberry Pi 4 (chip BCM2711, 4 nhân Cortex-A72), USB webcam Logitech, và 1 module relay 4 kênh. Phần mềm em viết bằng Python, tách rõ 3 module: detector chuyên về phân tích pixel, state machine ra quyết định, main module điều phối."*
 
 **1:30-3:00 — Demo trực tiếp**
 
@@ -571,8 +583,9 @@ HEADLESS=0 python src/main.py
 3. **Test 1**: *"Bây giờ em che mặt bằng tay — sau 15 giây sẽ có cảnh báo."*
    → Đếm to thành tiếng "1, 2, 3..."
    → Telegram kêu, mở ra cho hội đồng xem
-4. **Test 2**: *"Tiếp em rời khung — KHÔNG có cảnh báo, vì YOLO biết em không còn trong khung."*
-   → Bước ra khỏi khung 10s, không có notification → quay lại
+4. **Test 2**: *"Tiếp em rời khung trong thời gian NGẮN (dưới 15 giây) rồi quay lại — KHÔNG có cảnh báo vì chưa đủ ngưỡng 15s."*
+   → Bước ra khỏi khung ~8-10s (DƯỚI 15s), không có notification → quay lại, về SAFE
+   → ⚠️ *Lưu ý khi demo: ĐỪNG đứng ngoài khung quá 15s — vì safety-first, mặt biến mất ≥15s sẽ kích `Mất hoàn toàn khuôn mặt` (đây là chủ đích để không bỏ lọt trẻ bị phủ kín, không phải lỗi). Nếu hội đồng hỏi, trả lời theo Q31.*
 
 **3:00-4:00 — Highlight kỹ thuật**
 
@@ -581,7 +594,7 @@ Show slide chứa 4 tín hiệu, giải thích NGẮN:
 
 **4:00-5:00 — Kết luận**
 
-> *"Tổng kết, đề tài em giải quyết bài toán cảnh báo ngạt thở real-time, 100% local trên Orange Pi giá rẻ. Phát hiện multi-signal robust với edge case tay che. Có 29 unit test pass, đã chạy production trên thiết bị thực. Hướng phát triển tiếp theo là convert YOLO sang RKNN để dùng NPU 6 TOPS tăng tốc 10 lần, thêm IR camera cho ban đêm, và tích hợp relay đã có sẵn để kích còi báo động hardware."*
+> *"Tổng kết, đề tài em giải quyết bài toán cảnh báo ngạt thở real-time, 100% local trên Raspberry Pi 4 giá rẻ. Phát hiện multi-signal robust với edge case tay che. Có 51 unit test pass, đã chạy production trên thiết bị thực. Hướng phát triển tiếp theo là gắn Coral USB TPU tăng tốc person detection, thêm IR camera cho ban đêm, và tích hợp relay đã có sẵn để kích còi báo động hardware."*
 >
 > *"Em xin sẵn sàng nhận câu hỏi từ hội đồng."*
 
@@ -606,15 +619,15 @@ Show slide chứa 4 tín hiệu, giải thích NGẮN:
 
 ### Điểm 2: Có optimization mindset
 
-> *"Em phát hiện YOLO không cần chạy mỗi frame — em set YOLO_EVERY=5, cache kết quả 1 giây. Giảm CPU load YOLO từ ~30ms/frame xuống còn ~6ms/frame amortized."*
+> *"Em phát hiện YOLO không cần chạy mỗi frame — trên Pi 4 em set YOLO_EVERY=10, cache kết quả 1 giây. Giảm CPU load YOLO đi ~10 lần (amortized), nhờ đó giữ được FPS cho MediaPipe."*
 
 ### Điểm 3: Hiểu sâu về dependency hell
 
-> *"Khi cài trên Orange Pi em gặp lỗi 'No space left on device'. Em debug ra: PyTorch 2.11 trên Linux đã bỏ constraint platform_machine == x86_64, kéo về nvidia-cudnn-cu13 433MB ngay cả trên ARM. Em pin torch<2.4 trong requirements.txt — phiên bản cũ vẫn có constraint x86_64-only. Đây là bug packaging của PyTorch upstream em đã verify trên PyPI metadata."*
+> *"Khi cài trên Raspberry Pi 4 em gặp lỗi 'No space left on device'. Em debug ra: PyTorch ≥2.4 trên Linux đã bỏ constraint platform_machine == x86_64, kéo về nvidia-cudnn-cu13 433MB ngay cả trên ARM. Em pin torch<2.4 trong requirements.txt — phiên bản cũ vẫn có constraint x86_64-only. Đây là bug packaging của PyTorch upstream em đã verify trên PyPI metadata."*
 
 ### Điểm 4: Robust testing
 
-> *"Em có 29 unit test pass 100%. Đặc biệt test_hand_stability_under_landmark_drift mô phỏng MediaPipe nhảy landmark ngẫu nhiên — verify rằng alert vẫn fire ổn định 100% với 9/9 frame dù landmark di chuyển 5-10 pixel."*
+> *"Em có 51 unit test pass 100%. Đặc biệt test_hand_stability_under_landmark_drift mô phỏng MediaPipe nhảy landmark ngẫu nhiên — verify rằng alert vẫn fire ổn định 100% với 9/9 frame dù landmark di chuyển 5-10 pixel."*
 
 ### Điểm 5: Production-ready
 
@@ -622,7 +635,15 @@ Show slide chứa 4 tín hiệu, giải thích NGẮN:
 
 ### Điểm 6: Hardware awareness
 
-> *"Em chọn USB 3.0 cho camera vì USB 2.0 sẽ giới hạn 1280×720 xuống còn ~15 FPS — bandwidth bottleneck. Em document rõ trong INSTALL.md mục 4.3 'Cắm cổng xanh, không cắm cổng đen'."*
+> *"Em chọn cổng USB 3.0 (cổng xanh) cho camera vì USB 2.0 giới hạn băng thông → tụt FPS — bandwidth bottleneck. Em document rõ trong INSTALL_PI4.md §4.3 'Cắm cổng xanh, không cắm cổng đen'."*
+
+### Điểm 7: 3 lớp logic chất lượng/an toàn bổ sung
+
+> *"Em thêm 3 lớp nâng chất lượng, đều rẻ CPU (~5ms, module `scene_monitor.py`):*
+> - *Blur-gate: khi cả khung mờ (autofocus hunting / motion blur ở FPS thấp) thì edge/lap tụt về 0 — em phát hiện và BỎ 2 phiếu texture đó, chỉ tin màu+da. Đây là cách em diệt đúng lớp false-positive đã từng gặp. Mấu chốt: che thật chỉ làm mờ vùng mặt, nền vẫn nét → độ nét toàn cục không sụt → không nhầm.*
+> - *Motion-absence: phát hiện vắng cử động (nghi ngưng thở) KỂ CẢ khi mặt không bị che — vì ngạt thở thật có thể không có vật che. Ngưỡng tự calibrate theo nhiễu nền camera; mặc định tắt vì cần tinh chỉnh theo môi trường.*
+> - *Watchdog + heartbeat: thiết bị an toàn KHÔNG được fail âm thầm — em tự giám sát camera đơ / quá tối / FPS sụp và gửi cảnh báo 'giám sát suy giảm', cộng heartbeat định kỳ 'vẫn đang canh'.*
+> - *Thông báo khởi động: lúc bật máy, hệ thống gửi Telegram yêu cầu đưa mặt trẻ vào khung để hiệu chỉnh, nhắc lại nếu quên, và xác nhận khi đã bắt đầu giám sát — phòng trường hợp người dùng quên đặt trẻ/chỉnh camera mà tưởng đã được canh."*
 
 ---
 
@@ -659,11 +680,11 @@ Ví dụ:
 
 ### Câu khó 6: "Cha mẹ ngủ thì sao? Alert có đánh thức không?"
 
-✅ *"Telegram có sound notification mặc định. Cha mẹ có thể set tone alert RIÊNG cho bot này trong Telegram (cài đặt notification riêng cho từng chat). Đó là USER-SIDE setup. Bonus em có thiết kế kích relay hardware: kích còi báo động vật lý — chắc chắn đánh thức được (INSTALL.md §12)."*
+✅ *"Telegram có sound notification mặc định. Cha mẹ có thể set tone alert RIÊNG cho bot này trong Telegram (cài đặt notification riêng cho từng chat). Đó là USER-SIDE setup. Bonus em có thiết kế kích relay hardware: kích còi báo động vật lý — chắc chắn đánh thức được (INSTALL_PI4.md §12)."*
 
 ### Câu khó 7: "Camera mà ghi lại video trẻ con, có vi phạm gì không?"
 
-✅ *"Em không LƯU video, chỉ lưu ảnh tại MOMENT alert. Ảnh lưu LOCAL trên Orange Pi, không upload cloud. Cha mẹ có quyền xóa folder events/ bất cứ lúc nào. Em có cron rotation xóa ảnh sau 30 ngày tự động (INSTALL.md §10.5). Tôn trọng quyền riêng tư là design choice trung tâm của đồ án."*
+✅ *"Em không LƯU video, chỉ lưu ảnh tại MOMENT alert. Ảnh lưu LOCAL trên Raspberry Pi 4, không upload cloud. Cha mẹ có quyền xóa folder events/ bất cứ lúc nào. Em có cron rotation xóa ảnh sau 30 ngày tự động (INSTALL_PI4.md §10). Tôn trọng quyền riêng tư là design choice trung tâm của đồ án."*
 
 ### Câu khó 8: "Hệ thống em có khác gì so với MIT Babysense / Owlet?"
 
@@ -672,13 +693,13 @@ Ví dụ:
 ### Câu khó 9: "Em có nghĩ đến tấn công bảo mật không? Hack camera, fake alert?"
 
 ✅ *"Có 2 vector tấn công em đã suy nghĩ:*
-1. *Telegram token nếu lộ → attacker gửi fake alert. Em document rõ trong INSTALL.md là chmod 600 cho .env. Roadmap: rotate token định kỳ.*
-2. *Local network — attacker truy cập Orange Pi → xem video / disable alert. Em recommend chạy trên VLAN riêng + SSH key auth (mục 3.1).*
+1. *Telegram token nếu lộ → attacker gửi fake alert. Em document rõ trong INSTALL_PI4.md là chmod 600 cho .env. Roadmap: rotate token định kỳ.*
+2. *Local network — attacker truy cập Raspberry Pi 4 → xem video / disable alert. Em recommend chạy trên VLAN riêng + SSH key auth.*
 *Đây là hạn chế hiện tại, chưa có hardening đầy đủ."*
 
 ### Câu khó 10: "Em ra sản phẩm này thì bán bao nhiêu, lời được bao nhiêu?"
 
-✅ *"Đây là đồ án nghiên cứu, em chưa có business plan đầy đủ. Tuy nhiên ước tính nhanh: BOM ~2.5 triệu (Orange Pi 5 + cam + case + nguồn), giá bán ~5 triệu (margin 2x cho chi phí lắp ráp + dev). So với Owlet 5-7 triệu cộng subscription ~$10/tháng, sản phẩm em có lợi thế giá vốn thấp + không subscription. Nhưng cần marketing + service + certification — em không evaluate sâu được."*
+✅ *"Đây là đồ án nghiên cứu, em chưa có business plan đầy đủ. Tuy nhiên ước tính nhanh: BOM ~2.5 triệu (Raspberry Pi 4 + cam + case + nguồn), giá bán ~5 triệu (margin 2x cho chi phí lắp ráp + dev). So với Owlet 5-7 triệu cộng subscription ~$10/tháng, sản phẩm em có lợi thế giá vốn thấp + không subscription. Nhưng cần marketing + service + certification — em không evaluate sâu được."*
 
 ---
 
@@ -689,7 +710,7 @@ Ví dụ:
 - [ ] Đọc toàn bộ file này 2 lần
 - [ ] Luyện 50 Q&A bằng cách nói TO trước gương
 - [ ] Luyện kịch bản demo 5 phút **đúng 3 lần**
-- [ ] Test camera + Telegram lần cuối trên Orange Pi
+- [ ] Test camera + Telegram lần cuối trên Raspberry Pi 4
 - [ ] Backup record video demo phòng case fail
 - [ ] Check pin laptop + cable HDMI + adapter
 - [ ] In bản giấy file này phòng quên (cầm tay nhìn 5s)
@@ -706,7 +727,7 @@ Ví dụ:
 
 ### Sau bảo vệ — bất kể kết quả:
 
-> *Đề tài em đã làm thực sự, code hoạt động, có test, có document, đã chạy thực tế trên Orange Pi. Đây là sản phẩm có giá trị. Tự tin trình bày.*
+> *Đề tài em đã làm thực sự, code hoạt động, có test, có document, đã chạy thực tế trên Raspberry Pi 4. Đây là sản phẩm có giá trị. Tự tin trình bày.*
 
 ---
 

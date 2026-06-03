@@ -60,9 +60,9 @@ def scan_cameras(max_index=4):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source",   default="0", help="USB index hoặc RTSP URL")
-    ap.add_argument("--width",    type=int, default=1280)
-    ap.add_argument("--height",   type=int, default=720)
-    ap.add_argument("--fps",      type=int, default=30)
+    ap.add_argument("--width",    type=int, default=640)
+    ap.add_argument("--height",   type=int, default=480)
+    ap.add_argument("--fps",      type=int, default=15)
     ap.add_argument("--duration", type=int, default=8, help="thời gian đo (giây)")
     ap.add_argument("--headless", action="store_true", help="không mở cửa sổ")
     ap.add_argument("--scan",     action="store_true", help="liệt kê các camera khả dụng rồi thoát")
@@ -142,7 +142,7 @@ def main():
     if avg_fps < args.fps * 0.7:
         print(f"  ⚠️  FPS thấp hơn target ({args.fps}). Có thể do:")
         print("     - Camera không hỗ trợ resolution+FPS này (giảm xuống 640x480)")
-        print("     - USB 2.0 không đủ băng thông cho MJPG 720p")
+        print("     - USB 2.0 không đủ băng thông cho MJPG (cắm cổng USB 3.0 xanh)")
         print("     - Driver chưa tối ưu — thử thay cáp/cổng USB khác")
     elif drops > frame_count * 0.05:
         print(f"  ⚠️  Tỷ lệ drop cao ({drops}/{frame_count}) — kiểm tra cáp")

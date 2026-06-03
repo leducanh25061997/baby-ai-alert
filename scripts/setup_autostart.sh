@@ -1,11 +1,11 @@
 #!/bin/bash
 # ============================================================================
-#  setup_autostart.sh — Cài Baby AI Alert tự chạy khi bật Orange Pi
+#  setup_autostart.sh — Cài Baby AI Alert tự chạy khi bật Raspberry Pi 4
 # ============================================================================
 #  Chạy 1 LẦN DUY NHẤT. Sau đó mỗi lần cắm điện/boot, app tự chạy — KHÔNG
 #  cần gõ thêm lệnh nào nữa.
 #
-#  Cách dùng (trên Orange Pi, trong thư mục project):
+#  Cách dùng (trên Raspberry Pi 4, trong thư mục project):
 #       sudo bash scripts/setup_autostart.sh
 #
 #  Script tự động:
@@ -69,9 +69,9 @@ if [ -z "$RUN_USER" ] || [ "$RUN_USER" = "root" ]; then
 fi
 if [ "$RUN_USER" = "root" ]; then
     echo "⚠️  App sẽ chạy dưới root — không khuyến nghị. Nên tạo user thường"
-    echo "   (xem INSTALL.md §2.3) rồi chạy lại script bằng user đó qua sudo."
+    echo "   (xem INSTALL_PI4.md §3) rồi chạy lại script bằng user đó qua sudo."
 fi
-RUN_GROUP="video"   # cần group video để mở camera (INSTALL.md §4.2)
+RUN_GROUP="video"   # cần group video để mở camera (INSTALL_PI4.md §4.2)
 
 # --- Phát hiện python: ưu tiên venv của project ---
 if [ -x "$PROJ_ROOT/venv/bin/python" ]; then
@@ -79,10 +79,10 @@ if [ -x "$PROJ_ROOT/venv/bin/python" ]; then
 else
     PYTHON_BIN="$(command -v python3 || true)"
     echo "⚠️  Không thấy venv ($PROJ_ROOT/venv). Dùng python hệ thống: $PYTHON_BIN"
-    echo "   Khuyến nghị tạo venv trước (INSTALL.md §5)."
+    echo "   Khuyến nghị tạo venv trước (INSTALL_PI4.md §5)."
 fi
 if [ -z "$PYTHON_BIN" ]; then
-    echo "❌ Không tìm thấy python. Cài Python trước (INSTALL.md §5)."
+    echo "❌ Không tìm thấy python. Cài Python trước (INSTALL_PI4.md §5)."
     exit 1
 fi
 

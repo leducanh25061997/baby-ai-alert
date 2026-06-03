@@ -152,7 +152,7 @@ class OcclusionStateMachine:
         # Lưu ý đây chính là kịch bản nguy hiểm nhất (bị phủ kín).
         #
         # SAFETY-FIRST ORDERING: kiểm tra grace + occlusion_start TRƯỚC khi cho
-        # YOLO=False override reset. Lý do thực tế trên Orange Pi:
+        # YOLO=False override reset. Lý do thực tế (camera nhìn top-down):
         #   - Camera đặt nhìn TOP-DOWN xuống mặt trẻ nằm ngửa.
         #   - YOLO COCO 'person' class chủ yếu train trên người đứng/ngồi →
         #     top-down view trẻ → YOLO HAY trả False (miss detect, không

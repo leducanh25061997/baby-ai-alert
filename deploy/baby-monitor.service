@@ -1,5 +1,5 @@
 # ============================================================================
-#  Baby AI Alert — systemd service (autostart khi boot Orange Pi)
+#  Baby AI Alert — systemd service (autostart khi boot Raspberry Pi 4)
 # ============================================================================
 #  ĐÂY LÀ TEMPLATE. Đừng copy thẳng file này vào /etc/systemd/system/.
 #  Chạy `sudo bash scripts/setup_autostart.sh` — script sẽ tự điền các
@@ -11,13 +11,14 @@
 
 [Unit]
 Description=Baby AI Alert Monitor (phat hien ngat tho tre em)
-# network.target (KHÔNG dùng network-online.target) — camera KHÔNG cần mạng để
-# chạy, chỉ Telegram cần. Chờ network-online trên Pi 4 + WiFi hay treo 15-30s,
-# làm camera khởi chạy muộn oan. Alert Telegram đầu tiên chỉ xảy ra sau khi
-# calibrate + bị che >=15s (đã rất lâu sau boot) nên mạng chắc chắn đã lên;
-# nếu lúc đó vẫn rớt mạng, app tự retry gửi lại. → start sớm, không chờ mạng.
-After=network.target
-Wants=network.target
+# network-online.target — chờ mạng THẬT SỰ lên (WiFi associate + DHCP + DNS)
+# trước khi start, để alert Telegram đầu tiên sau boot không bị trượt vì mạng
+# chưa sẵn. Đánh đổi: detection bắt đầu trễ ~15-30s MỘT LẦN lúc boot. App còn
+# có warm-up + retry/backoff khi gửi (src/main.py) nên kể cả mạng lên trễ hơn
+# nữa alert vẫn tới. Cần bật dịch vụ chờ mạng: `sudo systemctl enable
+# NetworkManager-wait-online.service` (Bookworm dùng NetworkManager).
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -25,7 +26,8 @@ User=__USER__
 Group=__GROUP__
 WorkingDirectory=__PROJECT_DIR__
 
-# .env chỉ cần khi muốn override token/camera/threshold (xem INSTALL.md §7).
+# .env cần để đặt token Telegram thật (camera/FPS đã là default Pi 4 trong code).
+# Xem INSTALL_PI4.md §7.
 # Prefix `-` = không fail nếu file không tồn tại (default đã hardcode trong code).
 EnvironmentFile=-__PROJECT_DIR__/.env
 

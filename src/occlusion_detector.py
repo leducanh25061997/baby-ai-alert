@@ -328,11 +328,16 @@ class OcclusionDetector:
         return baseline, quality, "OK"
 
     def check(self, frame, landmarks, w, h,
-              prev_in_alert: bool) -> Optional[CheckResult]:
+              prev_in_alert: bool, texture_reliable: bool = True) -> Optional[CheckResult]:
         """Check 1 frame. Trả về None nếu chưa ready hoặc landmark fail.
 
         prev_in_alert: trạng thái ALERT của frame TRƯỚC. Dùng để biết có an
         toàn để update baseline không (không update khi vừa ra khỏi alert).
+
+        texture_reliable: False khi cả khung đang MỜ (autofocus hunting / motion
+        blur) — lúc đó edge/lap tụt về 0 không phải vì bị che. Khi False, BỎ 2
+        phiếu texture (edge, lap_var), chỉ tin hist + skin → chống false-positive
+        do mờ. Mặc định True (giữ nguyên hành vi cũ + test cũ).
         """
         if not self.is_ready:
             return None
@@ -364,17 +369,19 @@ class OcclusionDetector:
 
         # === Per-signal votes for "occluded" ===
         # Mỗi patch có 4 vote: hist / skin / edge / lap_var
+        # Khi cả khung mờ (texture_reliable=False) → edge/lap không đáng tin,
+        # BỎ 2 phiếu này (chống false-positive do autofocus/motion blur).
         nose_hist_v = nose_corr                  < self.nose.hist_threshold
         nose_skin_v = nose_sigs['skin_ratio']    < self.nose.skin_min_ratio
-        nose_edge_v = nose_sigs['edge_density']  < self.nose.edge_min_density
-        nose_lap_v  = nose_sigs['lap_var']       < self.nose.lap_var_min
+        nose_edge_v = texture_reliable and (nose_sigs['edge_density'] < self.nose.edge_min_density)
+        nose_lap_v  = texture_reliable and (nose_sigs['lap_var']      < self.nose.lap_var_min)
         nose_votes  = (int(nose_hist_v) + int(nose_skin_v)
                        + int(nose_edge_v) + int(nose_lap_v))
 
         mouth_hist_v = mouth_corr                 < self.mouth.hist_threshold
         mouth_skin_v = mouth_sigs['skin_ratio']   < self.mouth.skin_min_ratio
-        mouth_edge_v = mouth_sigs['edge_density'] < self.mouth.edge_min_density
-        mouth_lap_v  = mouth_sigs['lap_var']      < self.mouth.lap_var_min
+        mouth_edge_v = texture_reliable and (mouth_sigs['edge_density'] < self.mouth.edge_min_density)
+        mouth_lap_v  = texture_reliable and (mouth_sigs['lap_var']      < self.mouth.lap_var_min)
         mouth_votes  = (int(mouth_hist_v) + int(mouth_skin_v)
                         + int(mouth_edge_v) + int(mouth_lap_v))
 

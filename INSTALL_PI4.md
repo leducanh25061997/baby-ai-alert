@@ -1,12 +1,8 @@
 # Hướng dẫn cài đặt Baby AI Alert trên Raspberry Pi 4
 
-Hướng dẫn **độc lập, chi tiết** cho board **Raspberry Pi 4 Model B** (Broadcom BCM2711, 4 nhân Cortex-A72, ARM64/aarch64, CPU-only).
+Hướng dẫn **độc lập, chi tiết** cho board **Raspberry Pi 4 Model B** (Broadcom BCM2711, 4 nhân Cortex-A72, ARM64/aarch64, CPU-only). Đây là nền tảng **chính thức và duy nhất** của dự án — mọi default trong code đã được tune sẵn cho Pi 4.
 
-> 🟠 **Bạn đang dùng Orange Pi 5?** Xem [INSTALL.md](INSTALL.md) — bản gốc tune cho RK3588 + NPU.
-> File này là bản viết riêng cho Pi 4, **không cần đọc INSTALL.md** vẫn cài được trọn vẹn.
-
-> 📌 **Code KHÔNG đổi một dòng nào giữa Pi 4 và Orange Pi.** Khác biệt duy nhất là:
-> **(1)** hệ điều hành (Raspberry Pi OS 64-bit thay Ubuntu), **(2)** một file `.env` hạ resolution/FPS cho hợp sức Pi 4, **(3)** thư viện GPIO khác (nếu dùng relay). Hết.
+> 📌 **Toàn bộ default đã tune sẵn cho Pi 4 trong [src/main.py](src/main.py):** 640×480 @15fps, `YOLO_EVERY=10`, `HEADLESS=1`. Chạy thẳng là đúng cấu hình — **không cần sửa code, không bắt buộc file `.env`** cho phần hiệu năng. File `.env` giờ chỉ cần để đặt **token Telegram thật** của bạn (xem [§7](#7-tạo-file-env--token-telegram)).
 
 ---
 
@@ -18,7 +14,7 @@ Hướng dẫn **độc lập, chi tiết** cho board **Raspberry Pi 4 Model B**
 4. [Cài system dependencies](#4-cài-system-dependencies)
 5. [Cài Python + project dependencies](#5-cài-python--project-dependencies)
 6. [Tạo Telegram bot + lấy token](#6-tạo-telegram-bot--lấy-token)
-7. [Tạo file `.env` cho Pi 4 (BẮT BUỘC)](#7-tạo-file-env-cho-pi-4-bắt-buộc)
+7. [Tạo file `.env` — token Telegram](#7-tạo-file-env--token-telegram)
 8. [Verify cài đặt](#8-verify-cài-đặt)
 9. [Chạy chương trình](#9-chạy-chương-trình)
 10. [Autostart bằng systemd](#10-autostart-bằng-systemd)
@@ -217,14 +213,14 @@ và dùng `python3.11 -m venv venv` ở bước sau.
 
 ### 5.3 Cài 1 phát ăn ngay (KHUYẾN NGHỊ)
 
-Dự án có sẵn script tự xử lý mọi cạm bẫy ARM64 CPU-only (torch kéo nvidia-cudnn vô dụng, pip cache hỏng, numpy/opencv mismatch…). Tên là `install_opi.sh` nhưng nội dung **generic cho mọi ARM64 CPU-only**, chạy đúng trên Pi 4:
+Dự án có sẵn script tự xử lý mọi cạm bẫy ARM64 CPU-only (torch kéo nvidia-cudnn vô dụng, pip cache hỏng, numpy/opencv mismatch…):
 
 ```bash
-bash scripts/install_opi.sh
+bash scripts/install_pi4.sh
 ```
 
 Script tự động:
-1. Set `TMPDIR=$HOME/tmp` (vô hại trên Pi OS vì `/tmp` nằm trên thẻ SD, không phải tmpfs RAM như Orange Pi — nhưng để cho chắc).
+1. Set `TMPDIR=$HOME/tmp` (trên Pi OS `/tmp` nằm trên thẻ SD nên thường không đầy, nhưng set cho chắc — vô hại).
 2. Tạo `venv/` nếu chưa có + activate.
 3. Upgrade pip + wheel + setuptools.
 4. Uninstall mọi `torch`/`nvidia-*`/`cuda-toolkit`/`triton` cũ (nếu lỡ cài).
@@ -297,44 +293,50 @@ Phải nhận được tin "test from pi4" trong Telegram.
 
 ---
 
-## 7. Tạo file `.env` cho Pi 4 (BẮT BUỘC)
+## 7. Tạo file `.env` — token Telegram
 
-> **Vì sao Pi 4 cần `.env` mà Orange Pi không:** Pi 4 (4 nhân Cortex-A72 @1.5–1.8GHz) yếu hơn RK3588 (8 nhân A76+A55) khoảng **3–4 lần**. Ở mặc định 1280×720 trong code, pipeline trên Pi 4 dễ tụt xuống **~4–6 FPS** — đụng đúng sàn "cần ≥6 FPS" của state machine. Hạ về 640×480 và giãn YOLO lấy lại FPS an toàn. **Tất cả qua env, không sửa code.**
+> **`.env` còn cần làm gì:** Mọi default hiệu năng (640×480 @15fps, `YOLO_EVERY=10`, `HEADLESS=1`) đã hardcode sẵn cho Pi 4 trong [src/main.py](src/main.py) — **không cần `.env` cho phần này nữa**. Việc thật sự cần là đặt **token Telegram thật** của bạn (token trong code chỉ là demo). Vì vậy vẫn nên tạo `.env`.
 
-Dự án có sẵn file mẫu tune đúng cho Pi 4 — chỉ cần copy và sửa token:
+Dự án có sẵn file mẫu — copy và sửa token:
 ```bash
-cp .env.pi4.example .env
+cp .env.example .env
 nano .env            # đổi TELEGRAM_TOKEN + TELEGRAM_CHAT_ID thành của bạn
 chmod 600 .env       # bảo vệ token (chỉ owner đọc được)
 ```
 
-`.env.pi4.example` đã set sẵn:
+`.env.example` tối thiểu chỉ cần 2 dòng:
 ```ini
-CAMERA_WIDTH=640
-CAMERA_HEIGHT=480
-CAMERA_FPS=15
-YOLO_EVERY=10
-HEADLESS=1
+TELEGRAM_TOKEN=<token-bot-cua-ban>
+TELEGRAM_CHAT_ID=<chat-id-cua-ban>
 ```
 
-### Bảng đầy đủ các biến (default trong code = giá trị OPi)
+### Bảng đầy đủ các biến (default trong code = đã tune cho Pi 4)
 
-| Biến | Default code | Đặt cho Pi 4 | Tác dụng |
-|---|---|---|---|
-| `TELEGRAM_TOKEN` | token demo | **token của bạn** | Token Telegram bot |
-| `TELEGRAM_CHAT_ID` | chat demo | **chat ID của bạn** | Nơi nhận alert |
-| `CAMERA_SOURCE` | `0` | `0` | index/`/dev/video0`/`rtsp://...` |
-| `CAMERA_WIDTH` / `HEIGHT` / `FPS` | 1280 / 720 / 30 | **640 / 480 / 15** | Hạ tải MediaPipe cho Pi 4 |
-| `YOLO_EVERY` | `5` | **`10`** | YOLO chạy mỗi N frame (chỉ dùng khi mất mặt → giãn không hại độ nhạy) |
-| `HEADLESS` | `1` | `1` | `1`=không mở cửa sổ (Pi chạy không màn hình) |
-| `DETECTION_MODE` | `multi_signal` | `multi_signal` | hoặc `strict` (safety-first, bỏ multi-signal, tiết kiệm 6–12ms/frame) |
-| `OCCLUSION_THRESHOLD_SEC` | `15` | `15` | Số giây bị che liên tục → alert |
-| `CALIBRATION_SEC` | `5` | `5` | Thời gian calibrate baseline lúc khởi động |
-| `CONFIRM_FRAMES` | `10` | (giữ; hạ `8` nếu alert giật) | Số frame xác nhận trước khi đổi state |
-| `SMOOTHER_MAX_MISS` | `3` | (giữ; tăng `4` nếu landmark nhảy) | Cho landmark jumpy N frame không reset |
-| `AUTO_RECAL_AFTER_SEC` | `1800` | `1800` | Tự recalib sau 30 phút safe liên tục (0=tắt) |
-| `MP_DETECTION_CONFIDENCE` | `0.6` | `0.6` | MediaPipe min detection conf (chỉ `multi_signal`) |
-| `MP_TRACKING_CONFIDENCE` | `0.6` | `0.6` | MediaPipe min tracking conf |
+| Biến | Default code (Pi 4) | Tác dụng |
+|---|---|---|
+| `TELEGRAM_TOKEN` | token demo | **Đổi thành token của bạn** |
+| `TELEGRAM_CHAT_ID` | chat demo | **Đổi thành chat ID của bạn** |
+| `CAMERA_SOURCE` | `0` | index/`/dev/video0`/`rtsp://...` |
+| `CAMERA_WIDTH` / `HEIGHT` / `FPS` | **640 / 480 / 15** | Camera đặt xa → thử 800×600. Đừng lên 720p (Pi 4 tụt FPS) |
+| `YOLO_EVERY` | **`10`** | YOLO chạy mỗi N frame (chỉ dùng khi mất mặt → giãn không hại độ nhạy) |
+| `HEADLESS` | `1` | `1`=không mở cửa sổ (Pi chạy không màn hình); `0` khi dev có HDMI |
+| `DETECTION_MODE` | `multi_signal` | hoặc `strict` (safety-first, bỏ multi-signal, tiết kiệm 6–12ms/frame) |
+| `OCCLUSION_THRESHOLD_SEC` | `15` | Số giây bị che liên tục → alert |
+| `CALIBRATION_SEC` | `5` | Thời gian calibrate baseline lúc khởi động |
+| `CONFIRM_FRAMES` | `10` | Tăng (15–20) → ổn định hơn, response chậm hơn chút |
+| `SMOOTHER_MAX_MISS` | `3` | Tăng `4` nếu landmark nhảy nhiều |
+| `AUTO_RECAL_AFTER_SEC` | `1800` | Tự recalib sau 30 phút safe liên tục (0=tắt) |
+| `MP_DETECTION_CONFIDENCE` | `0.6` | MediaPipe min detection conf (chỉ `multi_signal`) |
+| `MP_TRACKING_CONFIDENCE` | `0.6` | MediaPipe min tracking conf |
+| `BLUR_DROP_FRAC` | `0.45` | Blur-gate: độ nét < frac×baseline → bỏ phiếu edge/lap (chống false alert do mờ) |
+| `NO_MOTION_ALERT_SEC` | `0` (tắt) | Bật cảnh báo "nghi bất động/ngưng thở" sau N giây vắng cử động (đặt `30` để bật) |
+| `MOTION_MIN_DELTA` | `0.4` | Sàn tuyệt đối cho "có cử động" (tăng nếu báo bất động nhầm) |
+| `HEALTH_MIN_FPS` | `3.0` | Watchdog: FPS dưới mức này (kéo dài) → cảnh báo suy giảm |
+| `HEALTH_DARK_LUMA` | `25` | Watchdog: độ sáng TB dưới mức này → cảnh báo "quá tối" |
+| `HEALTH_DEGRADE_SEC` | `20` | Sự cố kéo dài ≥ N giây mới cảnh báo (chống spam) |
+| `HEARTBEAT_SEC` | `0` (tắt) | Gửi Telegram "vẫn đang canh" mỗi N giây (vd `21600`=6h) |
+| `STARTUP_NOTIFY` | `1` (bật) | Lúc khởi động gửi Telegram yêu cầu đưa mặt trẻ vào khung + xác nhận khi hiệu chỉnh xong |
+| `CALIB_REMIND_SEC` | `60` | Nhắc lại "đưa mặt vào khung" mỗi N giây nếu mãi chưa hiệu chỉnh được |
 
 > 🚫 **Không có `YOLO_DEVICE`.** Project CPU-only, không hỗ trợ NVIDIA GPU. Pi 4 cũng không có NPU.
 > ⚠️ Đừng commit `.env` lên git (chứa token). Thêm `.env` vào `.gitignore`.
@@ -350,8 +352,10 @@ Chạy theo thứ tự, mỗi bước phải pass.
 cd ~/baby-ai-alert
 source venv/bin/activate
 
-python tests/test_state_machine.py        # Mong đợi: 🎉 11/11 test PASS
-python tests/test_occlusion_detector.py    # Mong đợi: 🎉 14/14 test PASS
+python tests/test_state_machine.py        # Mong đợi: 🎉 14/14 test PASS
+python tests/test_occlusion_detector.py    # Mong đợi: 🎉 16/16 test PASS
+python tests/test_scene_monitor.py         # Mong đợi: 🎉 7/7 test PASS
+python tests/test_alert_policy.py          # Mong đợi: 🎉 14/14 test PASS
 ```
 
 ### 8.2 Scan camera
@@ -378,16 +382,24 @@ Kỳ vọng trên Pi 4 (CPU, 480p): end-to-end **~120–180ms (~6–8 FPS)**. Mi
 
 ## 9. Chạy chương trình
 
-### 9.1 Chạy bằng `run.sh` (vì Pi 4 có `.env`)
+### 9.1 Chạy chương trình
 
-Tạo wrapper nạp `.env` rồi chạy:
+Default trong code **đã đúng cho Pi 4** (640×480 @15fps), nên chạy thẳng cũng ra đúng cấu hình:
+```bash
+cd ~/baby-ai-alert
+source venv/bin/activate
+python src/main.py
+```
+
+Nhưng để **tự nạp token** trong `.env` (§7), nên dùng wrapper `run.sh` — Python không tự đọc `.env`, phải `source` vào shell trước:
+
 ```bash
 cat > ~/baby-ai-alert/run.sh << 'EOF'
 #!/bin/bash
 set -e
 cd "$(dirname "$0")"
 if [ -f .env ]; then
-    set -a; source .env; set +a
+    set -a; source .env; set +a    # nạp token (+ override nếu có) vào môi trường
 fi
 source venv/bin/activate
 exec python src/main.py
@@ -397,7 +409,15 @@ chmod +x ~/baby-ai-alert/run.sh
 ./run.sh
 ```
 
-> Chạy trực tiếp `python src/main.py` cũng được, nhưng khi đó **không** tự nạp `.env` (sẽ dùng default 720p của code) — nên trên Pi 4 hãy dùng `run.sh` hoặc systemd (§10), cả hai đều nạp `.env`.
+> 💡 Chạy thẳng `python src/main.py` (không `run.sh`) thì camera/FPS vẫn đúng (640×480 — đã là default), chỉ **không nạp token trong `.env`** → app dùng token demo. Để gửi alert về Telegram của bạn thì phải `run.sh`/systemd, hoặc tự `export TELEGRAM_TOKEN=...` trước khi chạy.
+
+#### Verify cấu hình lúc khởi động
+
+Log khởi động in dòng `Camera`. Trên Pi 4 phải thấy **640x480**:
+```
+   Camera           : 0 → 640x480 @ 15fps      ✅ ĐÚNG (default Pi 4)
+```
+Nếu thấy `1280x720` → có ai đó set `CAMERA_WIDTH/HEIGHT` cao trong `.env`. Pi 4 không kham nổi 720p (FPS tụt còn ~4–6 → ảnh mờ → mũi/miệng mất chi tiết → **báo nhầm**). Hạ lại 640×480.
 
 ### 9.2 Test 4 kịch bản cảnh báo
 
@@ -406,7 +426,11 @@ chmod +x ~/baby-ai-alert/run.sh
 | 1 | **Mặt sạch ngồi yên 30s** | votes 0/4 hoặc 1/4. KHÔNG alert. |
 | 2 | **Tay che mũi/miệng 15s+** | votes 2–3/4 (`lap` giảm rõ). Sau 15s → Telegram alert `MUI/MIENG BI CHE` |
 | 3 | **Chăn phủ kín mặt 15s+** | votes 4/4 ngay. Sau 15s → alert (hoặc `Mất hoàn toàn khuôn mặt`) |
-| 4 | **Rời khung (KHÔNG alert)** | Bước hẳn ra ngoài → YOLO không thấy người → state `NO_FACE`, KHÔNG gửi tin |
+| 4a | **Chưa đặt trẻ vào (khung trống) + YOLO không thấy người** | state `NO_FACE`, KHÔNG gửi tin |
+| 4b | **Rời khung NGẮN (<15s) rồi quay lại** | Chưa đủ ngưỡng → KHÔNG gửi tin, về lại `SAFE` |
+| 4c | **Đã thấy mặt rồi rời khung ≥15s** (kể cả YOLO không thấy người) | ⚠️ **VẪN gửi** `Mất hoàn toàn khuôn mặt` — chủ đích **safety-first** (xem ghi chú dưới) |
+
+> ⚠️ **Quan trọng — thiết kế safety-first:** một khi đã thấy mặt trẻ rồi mặt **biến mất**, hệ thống coi đó là **nghi bị phủ kín** và đếm tới 15s rồi báo, **bất kể YOLO nói gì**. Lý do: camera đặt **top-down** xuống cũi → YOLO (train trên người đứng) hay **sót** trẻ nằm bị chăn phủ → nếu tin "YOLO không thấy người = rời khung" sẽ **bỏ lọt ca ngạt thở thật**. Hệ thống chấp nhận **báo nhầm khi cha mẹ bế trẻ đi** để TUYỆT ĐỐI không miss. YOLO chỉ dùng để: (a) **bắt đầu đếm** khi thấy người mà không thấy mặt (chưa từng track mặt), và (b) **im lặng** khi khung trống chưa từng thấy mặt (4a). → Khi demo "rời khung không báo", hãy quay lại **trước 15s** (4b).
 
 Mỗi event lưu `events/possible_suffocation_risk_<timestamp>.jpg` + `.json` (kèm 4 signal values) ở lần cảnh báo ĐẦU. Khi vẫn còn che → re-alert Telegram mỗi 15s (kèm ảnh mới) nhưng KHÔNG ghi thêm file trùng (tránh phình đĩa).
 
@@ -433,17 +457,23 @@ HEADLESS=0 python src/main.py     # cần X-forwarding hoặc HDMI gắn trực 
 
 ### 10.1 Cài 1 lệnh (KHUYẾN NGHỊ)
 
-Script tự dò user/group/python/path (không hardcode Orange Pi), chạy nguyên trên Pi 4:
+Script tự dò user/group/python/path (không hardcode đường dẫn):
 ```bash
 sudo bash scripts/setup_autostart.sh
 ```
 Nó tự: sinh `/etc/systemd/system/baby-monitor.service` từ template (điền đúng user/path/python của bạn), tạo file log + logrotate 7 ngày, cron dọn `events/` > 30 ngày, thêm user vào group `video`, rồi enable + start.
 
 Service template ([deploy/baby-monitor.service](deploy/baby-monitor.service)) đã vá sẵn cho chạy 24/7:
-- `After=network-online.target` → chờ có internet thật (alert Telegram đầu không trượt)
+- `After=network-online.target` → chờ mạng THẬT SỰ lên (WiFi+DHCP+DNS) → **alert Telegram đầu sau boot không bị trượt vì mạng chưa sẵn**
 - `ExecStartPre` chờ `/dev/video0` tối đa 30s (USB webcam chưa sẵn ngay lúc boot)
 - `Restart=always` + `RestartSec=10` + `MemoryMax=1G`
 - `EnvironmentFile=-/.../.env` → **tự nạp file `.env` Pi 4 ở §7** khi boot
+
+> ⚠️ Để `network-online.target` có tác dụng (Bookworm dùng NetworkManager), bật dịch vụ chờ mạng:
+> ```bash
+> sudo systemctl enable NetworkManager-wait-online.service
+> ```
+> App còn có **warm-up + retry/backoff** khi gửi Telegram ([src/main.py](src/main.py)): lúc khởi động tự "hâm" kết nối ở thread nền, và mỗi alert thử lại nhiều lần (0→2→5→10→20s) nếu mạng cold — nên kể cả mạng lên trễ, alert đầu vẫn tới thay vì bị bỏ.
 
 ### 10.2 Kiểm tra & vận hành
 ```bash
@@ -491,11 +521,24 @@ arm_freq=1900
 ```
 → `sudo reboot`. ⚠️ Chỉ làm khi tản nhiệt đủ; ép xung mà nóng sẽ throttle ngược lại.
 
+### 11.3 Tính năng chất lượng bổ sung (mới)
+
+Ba lớp logic nâng chất lượng/độ an toàn, đều rẻ CPU (~5ms/frame, dùng chung 1 ảnh xám downscale trong [src/scene_monitor.py](src/scene_monitor.py)):
+
+1. **Blur-gate (BẬT sẵn)** — khi CẢ khung đột ngột mờ (autofocus hunting / motion blur ở FPS thấp), `edge`/`lap` tụt về 0 không phải do bị che → detector **bỏ 2 phiếu texture** vòng đó, chỉ tin hist+skin. Diệt đúng lớp false-positive đã gặp. Vật/tay che thật chỉ làm mờ vùng mặt (nền vẫn nét) → độ nét toàn cục không sụt → gate **không** kích → vẫn phát hiện che bình thường. Chỉnh `BLUR_DROP_FRAC`.
+
+2. **Motion-absence (TẮT mặc định)** — phát hiện **vắng cử động** (nghi ngưng thở) kể cả khi mặt KHÔNG bị che. Ngưỡng "có cử động" tự calibrate theo nhiễu nền của camera lúc khởi động. **Mặc định tắt** vì cảnh "ngồi yên" có thể báo nhầm — bật bằng `NO_MOTION_ALERT_SEC=30` rồi tinh chỉnh `MOTION_MIN_DELTA` cho môi trường thật. Khi bật, cảnh báo Telegram riêng `CẢNH BÁO BẤT ĐỘNG — NGHI NGƯNG THỞ`.
+   > ⚠️ Khi bật, **đừng test "ngồi yên 30s"** nữa (sẽ kích bất động) — đây là tính năng bổ trợ, KHÔNG thay occlusion/face_lost.
+
+3. **Watchdog + heartbeat (BẬT sẵn, trừ heartbeat)** — tự giám sát để **không fail âm thầm**: camera ĐƠ (frame trùng) / phòng QUÁ TỐI / FPS quá thấp kéo dài ≥ `HEALTH_DEGRADE_SEC` → gửi `⚠️ GIÁM SÁT SUY GIẢM`, và báo `✅ Đã khôi phục` khi hết. Bật heartbeat định kỳ ("vẫn đang canh") bằng `HEARTBEAT_SEC` (vd 6h).
+
+4. **Thông báo khởi động / hiệu chỉnh (BẬT sẵn)** — lúc khởi động (kể cả autostart lúc boot) gửi Telegram **🟢 yêu cầu đưa mặt trẻ vào khung** để hiệu chỉnh; **nhắc lại** mỗi `CALIB_REMIND_SEC` nếu mãi chưa thấy mặt (vd quên chỉnh camera); và **✅ xác nhận "bắt đầu giám sát"** khi hiệu chỉnh xong (kèm cảnh báo nếu chất lượng thấp). → Người dùng không nhận được tin xác nhận = biết ngay hệ thống **chưa** giám sát. Tắt bằng `STARTUP_NOTIFY=0`.
+
 ---
 
 ## 12. (Optional) Kích relay khi có cảnh báo
 
-Pi 4 dùng thư viện GPIO **khác Orange Pi** (`RPi.GPIO`/`lgpio` thay `OPi.GPIO`). Layout 40-pin tương thích vật lý nhưng mapping BCM khác.
+Pi 4 dùng thư viện GPIO **`RPi.GPIO`** (hoặc `lgpio` trên Bookworm). Layout 40-pin chuẩn Raspberry Pi.
 
 ### 12.1 Đấu dây module relay 4 kênh
 | Relay pin | Pi 4 GPIO (BCM) | Pi 4 physical pin |
@@ -594,8 +637,9 @@ Nguồn yếu — dùng **adapter USB-C 5V/3A chính hãng**, không dùng cáp 
 - Recalibrate (`R` hoặc `kill -USR1`).
 
 ### Mặt sạch nhưng vẫn alert (false positive)
+- **NGUYÊN NHÂN SỐ 1 TRÊN PI 4: camera đang chạy ở 720p.** Kiểm tra log khởi động có in `640x480` không ([§9.1](#91-chạy-chương-trình)). Nếu in `1280x720` → có ai set `CAMERA_WIDTH/HEIGHT` cao trong `.env`/env → Pi 4 tụt FPS → ảnh mờ → `edge≈0`/`lap≈0` ở mũi/miệng → báo nhầm. Fix: bỏ override, để default 640×480.
 - `quality` < 0.5 → calibration kém → recalibrate trong điều kiện ổn định.
-- Tăng `LAPVAR_ABSOLUTE_FLOOR` / `EDGE_ABSOLUTE_FLOOR` (bớt nhạy), tăng `CONFIRM_FRAMES` (15–20).
+- Tăng `CONFIRM_FRAMES` (15–20) để vài frame nhòe không kịp confirm. Nếu riêng cái mũi hay vote (`edge=0.000 lap` thấp dù da rõ), nới `EDGE_DROP_FRAC`/`LAPVAR_DROP_FRAC` trong [src/occlusion_detector.py](src/occlusion_detector.py) (vd 0.55 / 0.70) để texture phải tụt nhiều hơn mới vote.
 
 ### `Failed to send Telegram message`
 - Không internet → `ping 8.8.8.8`. Token/chat ID sai → test curl ([§6.3](#63-test-gửi-từ-chính-pi-4)).
@@ -638,14 +682,14 @@ Raspberry Pi 4 Model B (BCM2711, 4GB/8GB RAM)
 │   │   ├── state_machine.py      ← FSM phát hiện ngạt thở
 │   │   └── occlusion_detector.py ← Multi-signal voting (hist+skin+edge+lap_var)
 │   ├── scripts/
-│   │   ├── install_opi.sh        ← One-shot install (generic ARM64, chạy đúng trên Pi 4)
+│   │   ├── install_pi4.sh       ← One-shot install cho Pi 4 (ARM64 CPU-only)
 │   │   ├── fix_env.sh            ← Fix opencv/numpy/nvidia variants
 │   │   ├── setup_autostart.sh    ← Cài systemd autostart (tự dò user/path)
 │   │   ├── test_webcam.py        ← Verify camera + FPS
 │   │   └── benchmark.py          ← Đo pipeline
-│   ├── tests/                    ← 11 + 14 test
-│   ├── .env                      ← BẮT BUỘC trên Pi 4 (640x480, FPS=15, YOLO_EVERY=10)
-│   ├── .env.pi4.example          ← mẫu .env cho Pi 4
+│   ├── tests/                    ← 11 + 15 test
+│   ├── .env                      ← token Telegram (camera/FPS đã là default code)
+│   ├── .env.example             ← mẫu .env (chủ yếu cho token)
 │   ├── run.sh                    ← wrapper nạp .env rồi chạy
 │   ├── events/                   ← snapshot + JSON khi alert (cron dọn 30 ngày)
 │   └── yolov8n.pt                ← person detection (CPU; hoặc Coral .tflite, §13)
@@ -656,18 +700,17 @@ Raspberry Pi 4 Model B (BCM2711, 4GB/8GB RAM)
     └── cron: dọn events/ 02:00 mỗi ngày
 ```
 
-### Khác biệt cốt lõi so với Orange Pi 5
+### Các điểm cần nhớ khi vận hành trên Pi 4
 
-| Hạng mục | Orange Pi 5 | Raspberry Pi 4 |
-|---|---|---|
-| OS | Ubuntu 22.04 ARM64 | **Raspberry Pi OS 64-bit (Bookworm)** |
-| `.env` | không cần (default = OPi) | **BẮT BUỘC** (640×480, FPS 15, YOLO_EVERY 10) |
-| Tăng tốc YOLO | NPU RK3588 (RKNN, 6 TOPS) | không NPU → CPU, hoặc Coral USB TPU (§13) |
-| GPIO relay | `OPi.GPIO` | `RPi.GPIO` / `lgpio` |
-| pip vào system python | được | **bị chặn (PEP 668) → bắt buộc venv** |
-| Code (`src/`) | — | **y nguyên, không sửa dòng nào** |
-
-Muốn chuyển ngược về Orange Pi 5: chỉ cần `rm .env` (hoặc `mv .env .env.pi4.bak`) → code tự dùng lại default OPi.
+| Hạng mục | Giá trị / lưu ý |
+|---|---|
+| OS | **Raspberry Pi OS 64-bit (Bookworm)** — BẮT BUỘC 64-bit (MediaPipe không có wheel 32-bit) |
+| Camera/FPS | **640×480 @15fps** (default code). Đừng lên 720p → Pi 4 tụt FPS → báo nhầm |
+| `.env` | Chỉ cần để đặt **token Telegram** thật; phần hiệu năng đã là default |
+| Tăng tốc YOLO | Pi 4 không có NPU → CPU; muốn nhanh hơn gắn **Coral USB TPU** (§13) |
+| GPIO relay | `RPi.GPIO` / `lgpio` (§12) |
+| pip vào system python | **bị chặn (PEP 668) → bắt buộc venv** |
+| Nguồn/nhiệt | USB-C 5V/3A chính hãng + heatsink/quạt (tránh undervoltage + throttle) |
 
 ---
 

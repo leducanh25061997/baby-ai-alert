@@ -8,7 +8,7 @@
 #
 # Vấn đề 2 (CUDA bloat trên ARM CPU-only):
 #   - torch>=2.4 trên Linux pull về nvidia-cudnn-cu13 (~433MB), nvidia-cublas-cu12,
-#     cuda_toolkit... dù chạy CPU. Trên Orange Pi /tmp tmpfs ~1GB → fail "No space".
+#     cuda_toolkit... dù chạy CPU. Trên ARM /tmp tmpfs nhỏ → có thể fail "No space".
 #   - Fix: pin torch<2.4 + uninstall mọi nvidia-* lỡ cài.
 #
 # Action:

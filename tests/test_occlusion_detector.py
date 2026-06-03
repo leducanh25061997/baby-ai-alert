@@ -319,6 +319,38 @@ def test_check_on_hand_alerts():
           f"hand_lap nose={result.nose_lap_var:.0f} mouth={result.mouth_lap_var:.0f})")
 
 
+def test_blur_gate_suppresses_texture_votes():
+    """BLUR GATE: khi cả khung mờ (texture_reliable=False) → bỏ phiếu edge/lap.
+
+    Tay che (hand) bình thường vote nhờ edge+lap (texture). Khi báo 'đang mờ',
+    2 phiếu này bị bỏ → hand không còn đủ vote → KHÔNG occluded. Đây là cách
+    chống false-positive do autofocus hunting / motion blur (lỗi đã gặp trên Pi 4).
+    """
+    det = OcclusionDetector()
+    lms = make_landmarks()
+    f_face = face_frame()
+    h_, w_ = f_face.shape[:2]
+    for _ in range(MIN_CALIB_SAMPLES + 5):
+        det.add_calibration_sample(f_face, lms, w_, h_)
+    ok, msg = det.finalize_calibration()
+    assert ok, msg
+
+    f_hand = hand_frame(w=w_, h=h_)
+    # texture đáng tin (mặc định) → hand vote occluded như cũ
+    r_ok = det.check(f_hand, lms, w_, h_, prev_in_alert=False, texture_reliable=True)
+    assert r_ok is not None and r_ok.occluded, "Texture tin cậy: hand phải occluded"
+    # cả khung mờ → bỏ phiếu edge/lap → hand KHÔNG còn đủ vote
+    r_blur = det.check(f_hand, lms, w_, h_, prev_in_alert=False, texture_reliable=False)
+    assert r_blur is not None
+    assert not r_blur.occluded, (
+        f"Khi mờ phải bỏ phiếu texture → không occluded, "
+        f"got nose={r_blur.nose_votes_for_occluded}/4 mouth={r_blur.mouth_votes_for_occluded}/4"
+    )
+    print(f"✅ test_blur_gate_suppresses_texture_votes  "
+          f"(reliable: nose={r_ok.nose_votes_for_occluded}/4 mouth={r_ok.mouth_votes_for_occluded}/4 → "
+          f"blurry: nose={r_blur.nose_votes_for_occluded}/4 mouth={r_blur.mouth_votes_for_occluded}/4)")
+
+
 def test_low_detail_face_no_false_alert():
     """REGRESSION: face baseline thấp (real-world adult) + absolute floor cao
     → MỌI frame trên mặt sạch đều vote occluded → persistent false alert.
@@ -454,6 +486,7 @@ if __name__ == "__main__":
         test_check_on_blanket_alerts,
         test_check_on_red_blanket_still_alerts,
         test_check_on_hand_alerts,
+        test_blur_gate_suppresses_texture_votes,
         test_low_detail_face_no_false_alert,
         test_hand_stability_under_landmark_drift,
         test_reset_clears_state,

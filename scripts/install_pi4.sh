@@ -1,9 +1,10 @@
 #!/bin/bash
-# One-shot installer cho Orange Pi (3B/5/5B/5 Plus).
+# One-shot installer cho Raspberry Pi 4 (Raspberry Pi OS 64-bit, ARM64 CPU-only).
 #
-# Xử lý 3 vấn đề kinh điển khi cài project trên OPi:
-#   1. /tmp là tmpfs RAM ~1GB → đầy khi pip cài torch (419MB) → "No space left"
-#      Fix: set TMPDIR = $HOME/tmp (disk thật)
+# Xử lý 3 vấn đề kinh điển khi cài project trên ARM64 CPU-only:
+#   1. Một số bản ARM Linux có /tmp là tmpfs RAM → đầy khi pip cài torch (419MB)
+#      → "No space left". Fix: set TMPDIR = $HOME/tmp. Trên Pi OS /tmp nằm trên
+#      thẻ SD nên thường không gặp, nhưng set cho chắc — vô hại.
 #   2. torch>=2.4 pull nvidia_cudnn_cu13 (433MB) dù chạy CPU-only
 #      Fix: pin torch<2.4 trong requirements.txt + cleanup nvidia-* sau cài
 #   3. pip cache cũ có thể chứa wheel hỏng / nvidia bloat từ lần trước
@@ -17,7 +18,7 @@ PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ_ROOT"
 
 echo "=========================================="
-echo "Baby AI Alert — Orange Pi installer"
+echo "Baby AI Alert — Raspberry Pi 4 installer"
 echo "Project dir: $PROJ_ROOT"
 echo "=========================================="
 

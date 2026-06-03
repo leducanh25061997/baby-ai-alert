@@ -185,7 +185,7 @@ def test_face_lost_returns_clean_then_resets():
 def test_yolo_no_person_in_grace_still_alerts():
     """SAFETY-FIRST: YOLO=False trong grace KHÔNG được reset.
 
-    Lý do thực tế trên Orange Pi: camera nhìn TOP-DOWN xuống mặt trẻ nằm,
+    Lý do thực tế: camera nhìn TOP-DOWN xuống mặt trẻ nằm,
     YOLO COCO 'person' class chủ yếu train trên người đứng/ngồi → top-down
     view của trẻ → YOLO HAY trả False sai. Khi giấy/chăn che kín mặt:
     MediaPipe mất tracking + YOLO trả False sai → nếu reset ngay sẽ MISS
