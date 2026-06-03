@@ -1,4 +1,4 @@
-"""Pure state machine cho phát hiện ngạt thở.
+"""Pure state machine cho phát hiện che mũi/miệng.
 
 Module này KHÔNG có dependency nào ngoài stdlib — vì vậy có thể unit test
 độc lập với cv2/mediapipe/telegram. main.py gọi step() mỗi frame và xử
@@ -28,7 +28,7 @@ class StepResult:
 
 
 class OcclusionStateMachine:
-    """Quản lý vòng đời cảnh báo ngạt thở.
+    """Quản lý vòng đời cảnh báo che mũi/miệng.
 
     Đầu vào mỗi frame:
       - now: timestamp (float seconds)
@@ -179,7 +179,7 @@ class OcclusionStateMachine:
         # 2b. Đã nghi che (occlusion_start set) → tiếp tục đếm BẤT KỂ YOLO khi:
         #   (a) ĐÃ bắn ≥1 alert trong event này (last_alert_at set) →
         #       KHÔNG BAO GIỜ bỏ cuộc vì time-out. Mặt bị phủ kín làm MediaPipe
-        #       mất tracking + YOLO top-down trả False sai là kịch bản ngạt thở
+        #       mất tracking + YOLO top-down trả False sai là kịch bản che kín
         #       chết người: phải re-alert mỗi repeat_alert_sec cho tới khi mặt
         #       quay lại sạch (nhánh 1 mới được reset). Chấp nhận false-positive
         #       (bế trẻ đi sau khi đã alert mà không quay lại khung) để TUYỆT

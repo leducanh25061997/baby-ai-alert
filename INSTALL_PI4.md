@@ -329,8 +329,6 @@ TELEGRAM_CHAT_ID=<chat-id-cua-ban>
 | `MP_DETECTION_CONFIDENCE` | `0.6` | MediaPipe min detection conf (chỉ `multi_signal`) |
 | `MP_TRACKING_CONFIDENCE` | `0.6` | MediaPipe min tracking conf |
 | `BLUR_DROP_FRAC` | `0.45` | Blur-gate: độ nét < frac×baseline → bỏ phiếu edge/lap (chống false alert do mờ) |
-| `NO_MOTION_ALERT_SEC` | `0` (tắt) | Bật cảnh báo "nghi bất động/ngưng thở" sau N giây vắng cử động (đặt `30` để bật) |
-| `MOTION_MIN_DELTA` | `0.4` | Sàn tuyệt đối cho "có cử động" (tăng nếu báo bất động nhầm) |
 | `HEALTH_MIN_FPS` | `3.0` | Watchdog: FPS dưới mức này (kéo dài) → cảnh báo suy giảm |
 | `HEALTH_DARK_LUMA` | `25` | Watchdog: độ sáng TB dưới mức này → cảnh báo "quá tối" |
 | `HEALTH_DEGRADE_SEC` | `20` | Sự cố kéo dài ≥ N giây mới cảnh báo (chống spam) |
@@ -430,9 +428,9 @@ Nếu thấy `1280x720` → có ai đó set `CAMERA_WIDTH/HEIGHT` cao trong `.en
 | 4b | **Rời khung NGẮN (<15s) rồi quay lại** | Chưa đủ ngưỡng → KHÔNG gửi tin, về lại `SAFE` |
 | 4c | **Đã thấy mặt rồi rời khung ≥15s** (kể cả YOLO không thấy người) | ⚠️ **VẪN gửi** `Mất hoàn toàn khuôn mặt` — chủ đích **safety-first** (xem ghi chú dưới) |
 
-> ⚠️ **Quan trọng — thiết kế safety-first:** một khi đã thấy mặt trẻ rồi mặt **biến mất**, hệ thống coi đó là **nghi bị phủ kín** và đếm tới 15s rồi báo, **bất kể YOLO nói gì**. Lý do: camera đặt **top-down** xuống cũi → YOLO (train trên người đứng) hay **sót** trẻ nằm bị chăn phủ → nếu tin "YOLO không thấy người = rời khung" sẽ **bỏ lọt ca ngạt thở thật**. Hệ thống chấp nhận **báo nhầm khi cha mẹ bế trẻ đi** để TUYỆT ĐỐI không miss. YOLO chỉ dùng để: (a) **bắt đầu đếm** khi thấy người mà không thấy mặt (chưa từng track mặt), và (b) **im lặng** khi khung trống chưa từng thấy mặt (4a). → Khi demo "rời khung không báo", hãy quay lại **trước 15s** (4b).
+> ⚠️ **Quan trọng — thiết kế safety-first:** một khi đã thấy mặt trẻ rồi mặt **biến mất**, hệ thống coi đó là **nghi bị phủ kín** và đếm tới 15s rồi báo, **bất kể YOLO nói gì**. Lý do: camera đặt **top-down** xuống cũi → YOLO (train trên người đứng) hay **sót** trẻ nằm bị chăn phủ → nếu tin "YOLO không thấy người = rời khung" sẽ **bỏ lọt ca bị che thật**. Hệ thống chấp nhận **báo nhầm khi cha mẹ bế trẻ đi** để TUYỆT ĐỐI không miss. YOLO chỉ dùng để: (a) **bắt đầu đếm** khi thấy người mà không thấy mặt (chưa từng track mặt), và (b) **im lặng** khi khung trống chưa từng thấy mặt (4a). → Khi demo "rời khung không báo", hãy quay lại **trước 15s** (4b).
 
-Mỗi event lưu `events/possible_suffocation_risk_<timestamp>.jpg` + `.json` (kèm 4 signal values) ở lần cảnh báo ĐẦU. Khi vẫn còn che → re-alert Telegram mỗi 15s (kèm ảnh mới) nhưng KHÔNG ghi thêm file trùng (tránh phình đĩa).
+Mỗi event lưu `events/face_covered_<timestamp>.jpg` + `.json` (kèm 4 signal values) ở lần cảnh báo ĐẦU. Khi vẫn còn che → re-alert Telegram mỗi 15s (kèm ảnh mới) nhưng KHÔNG ghi thêm file trùng (tránh phình đĩa).
 
 ### 9.3 Recalibration
 - **GUI mode** (có HDMI, `HEADLESS=0`): nhấn phím `R`.
@@ -527,12 +525,10 @@ Ba lớp logic nâng chất lượng/độ an toàn, đều rẻ CPU (~5ms/frame
 
 1. **Blur-gate (BẬT sẵn)** — khi CẢ khung đột ngột mờ (autofocus hunting / motion blur ở FPS thấp), `edge`/`lap` tụt về 0 không phải do bị che → detector **bỏ 2 phiếu texture** vòng đó, chỉ tin hist+skin. Diệt đúng lớp false-positive đã gặp. Vật/tay che thật chỉ làm mờ vùng mặt (nền vẫn nét) → độ nét toàn cục không sụt → gate **không** kích → vẫn phát hiện che bình thường. Chỉnh `BLUR_DROP_FRAC`.
 
-2. **Motion-absence (TẮT mặc định)** — phát hiện **vắng cử động** (nghi ngưng thở) kể cả khi mặt KHÔNG bị che. Ngưỡng "có cử động" tự calibrate theo nhiễu nền của camera lúc khởi động. **Mặc định tắt** vì cảnh "ngồi yên" có thể báo nhầm — bật bằng `NO_MOTION_ALERT_SEC=30` rồi tinh chỉnh `MOTION_MIN_DELTA` cho môi trường thật. Khi bật, cảnh báo Telegram riêng `CẢNH BÁO BẤT ĐỘNG — NGHI NGƯNG THỞ`.
-   > ⚠️ Khi bật, **đừng test "ngồi yên 30s"** nữa (sẽ kích bất động) — đây là tính năng bổ trợ, KHÔNG thay occlusion/face_lost.
+2. **Watchdog + heartbeat (BẬT sẵn, trừ heartbeat)** — tự giám sát để **không fail âm thầm**: camera ĐƠ (frame trùng) / phòng QUÁ TỐI / FPS quá thấp kéo dài ≥ `HEALTH_DEGRADE_SEC` → gửi `⚠️ GIÁM SÁT SUY GIẢM`, và báo `✅ Đã khôi phục` khi hết. Bật heartbeat định kỳ ("vẫn đang canh") bằng `HEARTBEAT_SEC` (vd 6h).
 
-3. **Watchdog + heartbeat (BẬT sẵn, trừ heartbeat)** — tự giám sát để **không fail âm thầm**: camera ĐƠ (frame trùng) / phòng QUÁ TỐI / FPS quá thấp kéo dài ≥ `HEALTH_DEGRADE_SEC` → gửi `⚠️ GIÁM SÁT SUY GIẢM`, và báo `✅ Đã khôi phục` khi hết. Bật heartbeat định kỳ ("vẫn đang canh") bằng `HEARTBEAT_SEC` (vd 6h).
-
-4. **Thông báo khởi động / hiệu chỉnh (BẬT sẵn)** — lúc khởi động (kể cả autostart lúc boot) gửi Telegram **🟢 yêu cầu đưa mặt trẻ vào khung** để hiệu chỉnh; **nhắc lại** mỗi `CALIB_REMIND_SEC` nếu mãi chưa thấy mặt (vd quên chỉnh camera); và **✅ xác nhận "bắt đầu giám sát"** khi hiệu chỉnh xong (kèm cảnh báo nếu chất lượng thấp). → Người dùng không nhận được tin xác nhận = biết ngay hệ thống **chưa** giám sát. Tắt bằng `STARTUP_NOTIFY=0`.
+3. **Thông báo khởi động / hiệu chỉnh (BẬT sẵn)** — lúc khởi động (kể cả autostart lúc boot) gửi Telegram **🟢 yêu cầu đưa mặt trẻ vào khung** để hiệu chỉnh; **nhắc lại** mỗi `CALIB_REMIND_SEC` nếu mãi chưa thấy mặt (vd quên chỉnh camera); và **✅ xác nhận "bắt đầu giám sát"** khi hiệu chỉnh xong (kèm cảnh báo nếu chất lượng thấp). → Người dùng không nhận được tin xác nhận = biết ngay hệ thống **chưa** giám sát. Tắt bằng `STARTUP_NOTIFY=0`.
+   > 🔍 **Cổng chất lượng hiệu chỉnh:** baseline là "định nghĩa mặt sạch" mà mọi lần phát hiện che về sau so sánh với — học từ frame **tối/mờ** sẽ ra baseline rác, kém tin cậy ngoài thực địa. Vì vậy pha hiệu chỉnh **chỉ gom mẫu từ frame ĐẠT** (độ sáng ≥ `HEALTH_DARK_LUMA`, không bị blur-gate). Nếu điều kiện kém kéo dài ≥ `CALIB_COND_GRACE_SEC` (mặc định 4s), hệ thống gửi Telegram **hướng dẫn cụ thể** ("phòng quá tối → bật đèn" / "hình mờ → chỉnh tiêu cự") và tiếp tục chờ điều kiện tốt thay vì học baseline kém.
 
 ---
 
@@ -582,7 +578,7 @@ Pi 4 **không có NPU**. Muốn tăng tốc YOLO (chỉ cần khi benchmark quá
 2. Trên Pi cài `pycoral` + `libedgetpu` (cắm Coral vào **USB 3.0**).
 3. Viết wrapper `CoralPersonDetector` thay `PersonDetector` trong [src/main.py](src/main.py) — cùng interface `has_person()`, chỉ đổi inference engine.
 
-> Đây là việc riêng ngoài scope hiện tại. Với mục đích phát hiện ngạt thở, YOLO chạy thưa (`YOLO_EVERY=10`) trên CPU thường là **đủ** — Coral chỉ cần nếu bạn ép real-time cao. Ping mình khi cần làm.
+> Đây là việc riêng ngoài scope hiện tại. Với mục đích phát hiện che mũi/miệng, YOLO chạy thưa (`YOLO_EVERY=10`) trên CPU thường là **đủ** — Coral chỉ cần nếu bạn ép real-time cao. Ping mình khi cần làm.
 
 ---
 
@@ -679,7 +675,7 @@ Raspberry Pi 4 Model B (BCM2711, 4GB/8GB RAM)
 │   ├── requirements.txt          ← deps pinned (numpy<2, opencv<4.11, torch<2.4)
 │   ├── src/
 │   │   ├── main.py               ← entrypoint, 3 guard env, signal handlers
-│   │   ├── state_machine.py      ← FSM phát hiện ngạt thở
+│   │   ├── state_machine.py      ← FSM phát hiện che mũi/miệng
 │   │   └── occlusion_detector.py ← Multi-signal voting (hist+skin+edge+lap_var)
 │   ├── scripts/
 │   │   ├── install_pi4.sh       ← One-shot install cho Pi 4 (ARM64 CPU-only)

@@ -3,8 +3,7 @@
 Tách khỏi main.py để unit-test độc lập (giống state_machine.py). main.py chỉ
 còn việc gọi các policy này rồi thực thi side-effect (gửi Telegram, in log).
 
-Gồm 4 policy nhỏ:
-  - MotionAbsencePolicy : khi nào bắn cảnh báo "nghi bất động/ngưng thở".
+Gồm 3 policy nhỏ:
   - Watchdog           : khi nào báo "giám sát suy giảm" / "đã khôi phục".
   - HeartbeatPolicy    : khi nào gửi heartbeat "vẫn đang canh".
   - CalibrationReminder: khi nào nhắc "đưa mặt vào khung" (chưa hiệu chỉnh được).
@@ -12,56 +11,6 @@ Gồm 4 policy nhỏ:
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
-
-
-# ---------------- Motion-absence (nghi bất động) ----------------
-
-@dataclass
-class AbsenceAlert:
-    elapsed: float      # đã vắng cử động bao lâu
-    is_first: bool      # True = cảnh báo đầu của đợt; False = re-alert
-
-
-class MotionAbsencePolicy:
-    """Quyết định bắn cảnh báo khi VẮNG cử động liên tục >= absent_sec, lặp lại
-    mỗi repeat_sec. Chỉ tính khi có trẻ trong khung (subject_present) và đã
-    calibrate ngưỡng chuyển động (ready)."""
-
-    def __init__(self, absent_sec: float, repeat_sec: float):
-        self.absent_sec = absent_sec      # <= 0 → TẮT
-        self.repeat_sec = repeat_sec
-        self.last_motion_t: Optional[float] = None
-        self.last_alert_at: Optional[float] = None
-
-    def reset(self):
-        self.last_motion_t = None
-        self.last_alert_at = None
-
-    def step(self, now: float, subject_present: bool, has_motion: bool,
-             ready: bool) -> Optional[AbsenceAlert]:
-        if self.absent_sec <= 0 or not ready:
-            return None
-        if not subject_present:                 # không có trẻ → không tính bất động
-            self.last_motion_t = now
-            self.last_alert_at = None
-            return None
-        if has_motion:                          # còn cử động → reset đồng hồ
-            self.last_motion_t = now
-            self.last_alert_at = None
-            return None
-        if self.last_motion_t is None:
-            self.last_motion_t = now
-            return None
-        elapsed = now - self.last_motion_t
-        if elapsed < self.absent_sec:
-            return None
-        if self.last_alert_at is None:
-            self.last_alert_at = now
-            return AbsenceAlert(elapsed, True)
-        if now - self.last_alert_at >= self.repeat_sec:
-            self.last_alert_at = now
-            return AbsenceAlert(elapsed, False)
-        return None
 
 
 # ---------------- Watchdog (tự giám sát) ----------------
@@ -150,5 +99,42 @@ class CalibrationReminder:
             return False
         if now - self._last >= self.remind_sec:
             self._last = now
+            return True
+        return False
+
+
+# ---------------- Calibration condition warner ----------------
+
+class CalibrationConditionWarner:
+    """Nhắc qua Telegram khi pha hiệu chỉnh bị KẸT vì điều kiện kém (phòng quá
+    tối / hình mờ) — máy chạy headless nên người dùng cần được hướng dẫn từ xa.
+
+    Trả True khi tới hạn nhắc, với điều kiện: đang hiệu chỉnh (calibrating) VÀ
+    điều kiện xấu kéo dài ≥ grace_sec (bỏ qua mờ thoáng qua do autofocus), lặp
+    mỗi remind_sec. Điều kiện tốt trở lại / ngừng hiệu chỉnh → quên (reset)."""
+
+    def __init__(self, enabled: bool, grace_sec: float, remind_sec: float):
+        self.enabled = enabled
+        self.grace_sec = grace_sec
+        self.remind_sec = remind_sec
+        self._bad_since: Optional[float] = None
+        self._last_warn: Optional[float] = None
+
+    def reset(self):
+        self._bad_since = None
+        self._last_warn = None
+
+    def step(self, now: float, calibrating: bool, conditions_bad: bool) -> bool:
+        if not self.enabled or not calibrating or not conditions_bad:
+            self._bad_since = None
+            self._last_warn = None
+            return False
+        if self._bad_since is None:
+            self._bad_since = now
+            return False
+        if now - self._bad_since < self.grace_sec:
+            return False
+        if self._last_warn is None or now - self._last_warn >= self.remind_sec:
+            self._last_warn = now
             return True
         return False

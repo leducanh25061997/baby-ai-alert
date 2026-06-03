@@ -61,42 +61,6 @@ def test_blur_gate_off_before_baseline():
     print("✅ test_blur_gate_off_before_baseline")
 
 
-def test_motion_threshold_and_has_motion():
-    """Calibrate motion trên cảnh tĩnh → ngưỡng thấp; frame động vượt ngưỡng,
-    frame tĩnh thì không."""
-    sm = SceneMonitor(motion_floor=0.4, motion_k=4.0)
-    static = gray_fill(120)
-    # Calibrate trên cảnh gần như tĩnh (chỉ nhiễu nhỏ)
-    rng = np.random.default_rng(1)
-    sm.analyze(static)
-    for _ in range(30):
-        noisy = np.clip(static.astype(np.int16) +
-                        rng.integers(-1, 2, static.shape, dtype=np.int16), 0, 255).astype(np.uint8)
-        sm.analyze(noisy)
-        sm.add_calib_motion()
-    thr = sm.finalize_motion_threshold()
-    assert thr >= 0.4
-
-    # Frame tĩnh (gần như giống trước) → không có cử động
-    sm.analyze(static)
-    sm.analyze(static)
-    assert not sm.has_motion, f"Cảnh tĩnh không được coi là có cử động (motion={sm.motion})"
-
-    # Frame thay đổi lớn → có cử động
-    sm.analyze(gray_fill(60))
-    assert sm.has_motion, f"Thay đổi lớn phải là có cử động (motion={sm.motion}, thr={thr:.2f})"
-    print(f"✅ test_motion_threshold_and_has_motion  (threshold={thr:.2f})")
-
-
-def test_has_motion_true_before_calibration():
-    """Chưa calibrate motion_threshold → has_motion=True (an toàn: không báo bất động nhầm)."""
-    sm = SceneMonitor()
-    sm.analyze(gray_fill(100))
-    sm.analyze(gray_fill(100))   # motion ~0 nhưng chưa có threshold
-    assert sm.has_motion is True
-    print("✅ test_has_motion_true_before_calibration")
-
-
 def test_frozen_frame_detection():
     """Frame y hệt nhau (diff=0) → is_frozen_frame=True; cảnh có thay đổi → False."""
     sm = SceneMonitor(frozen_eps=0.05)
@@ -123,11 +87,8 @@ def test_reset_clears_state():
     sm = SceneMonitor()
     sm.analyze(sharp_frame())
     sm.update_sharp_baseline()
-    sm.add_calib_motion()
-    sm.finalize_motion_threshold()
     sm.reset()
     assert sm.sharp_baseline is None
-    assert sm.motion_threshold is None
     assert sm._prev_gray is None
     print("✅ test_reset_clears_state")
 
@@ -138,8 +99,6 @@ if __name__ == "__main__":
     tests = [
         test_blur_gate_detects_global_blur,
         test_blur_gate_off_before_baseline,
-        test_motion_threshold_and_has_motion,
-        test_has_motion_true_before_calibration,
         test_frozen_frame_detection,
         test_luma_dark_vs_bright,
         test_reset_clears_state,

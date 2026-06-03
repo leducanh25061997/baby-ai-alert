@@ -84,11 +84,8 @@ from occlusion_detector import (
 )
 from scene_monitor import SceneMonitor
 from alert_policy import (
-    MotionAbsencePolicy, Watchdog, HeartbeatPolicy, CalibrationReminder,
+    Watchdog, HeartbeatPolicy, CalibrationReminder, CalibrationConditionWarner,
 )
-
-# Trigger cho cảnh báo "nghi bất động" (motion-absence) — riêng với occlusion.
-TRIGGER_NO_MOTION = "no_motion"
 
 # ===================== CONFIG =====================
 # Defaults được tune sẵn cho Raspberry Pi 4 Model B (BCM2711, 4 nhân Cortex-A72,
@@ -100,7 +97,7 @@ TRIGGER_NO_MOTION = "no_motion"
 #   - MediaPipe FaceMesh: tối ưu sẵn cho ARM CPU.
 #   - YOLOv8n: model nano (~6MB), CPU đủ nhanh khi YOLO_EVERY=10 trên Pi 4.
 #   - Pi 4 KHÔNG có NPU. Muốn tăng tốc YOLO → gắn Google Coral USB TPU
-#     (xem INSTALL_PI4.md §13). Không bắt buộc cho mục đích phát hiện ngạt thở.
+#     (xem INSTALL_PI4.md §13). Không bắt buộc cho mục đích phát hiện che mũi/miệng.
 
 TELEGRAM_TOKEN = os.environ.get(
     "TELEGRAM_TOKEN",
@@ -137,14 +134,6 @@ AUTO_RECAL_AFTER_SEC    = int(os.environ.get("AUTO_RECAL_AFTER_SEC", "1800"))
 # edge/lap vòng đó. Bật mặc định (cải thiện thuần, không có nhược điểm rõ rệt).
 BLUR_DROP_FRAC          = float(os.environ.get("BLUR_DROP_FRAC", "0.45"))
 
-# ---- Motion-absence (nghi bất động / ngưng thở) ----
-# Vắng cử động liên tục >= NO_MOTION_ALERT_SEC giây (khi có trẻ trong khung) →
-# cảnh báo. MẶC ĐỊNH TẮT (=0) vì cảnh "ngồi yên" có thể báo nhầm; bật bằng cách
-# đặt NO_MOTION_ALERT_SEC=30 và tinh chỉnh MOTION_MIN_DELTA cho môi trường thật.
-# Xem INSTALL_PI4.md §11.x. Đây là tính năng bổ trợ, KHÔNG thay occlusion/face_lost.
-NO_MOTION_ALERT_SEC     = int(os.environ.get("NO_MOTION_ALERT_SEC", "0"))
-MOTION_MIN_DELTA        = float(os.environ.get("MOTION_MIN_DELTA", "0.4"))
-
 # ---- Watchdog / heartbeat (tự giám sát, không fail âm thầm) ----
 # Cảnh báo suy giảm (camera đơ / quá tối / FPS thấp) khi kéo dài >= ngần này giây.
 HEALTH_DEGRADE_SEC      = float(os.environ.get("HEALTH_DEGRADE_SEC", "20"))
@@ -159,6 +148,10 @@ HEARTBEAT_SEC           = int(os.environ.get("HEARTBEAT_SEC", "0"))
 # lại mỗi CALIB_REMIND_SEC nếu mãi chưa thấy mặt; xác nhận khi hiệu chỉnh xong.
 STARTUP_NOTIFY          = os.environ.get("STARTUP_NOTIFY", "1").lower() in ("1", "true", "yes")
 CALIB_REMIND_SEC        = int(os.environ.get("CALIB_REMIND_SEC", "60"))
+# Cổng chất lượng khi hiệu chỉnh: chỉ học baseline từ frame ĐẠT (đủ sáng + nét).
+# Điều kiện kém kéo dài ≥ ngần này giây → gửi Telegram hướng dẫn (grace để bỏ
+# qua mờ thoáng qua do autofocus). Ngưỡng tối dùng chung HEALTH_DARK_LUMA.
+CALIB_COND_GRACE_SEC    = float(os.environ.get("CALIB_COND_GRACE_SEC", "4"))
 
 # YOLO settings (CPU-only). Default run_every=10 frame để giảm tải trên Pi 4
 # (4 nhân A72 yếu hơn → giãn YOLO; YOLO chỉ dùng khi mất mặt nên không hại độ nhạy).
@@ -315,7 +308,6 @@ class BabyMonitorV5:
         self.person_detector = PersonDetector(YOLO_MODEL_PATH)
         self.scene           = SceneMonitor(
             blur_drop_frac = BLUR_DROP_FRAC,
-            motion_floor   = MOTION_MIN_DELTA,
         )
         self.fsm             = OcclusionStateMachine(
             threshold_sec  = OCCLUSION_THRESHOLD_SEC,
@@ -325,12 +317,13 @@ class BabyMonitorV5:
         self.last_alert_time = 0.0
         self._prev_in_alert  = False
         # --- Policy timing thuần (test ở tests/test_alert_policy.py) ---
-        self.motion_policy = MotionAbsencePolicy(
-            absent_sec=NO_MOTION_ALERT_SEC, repeat_sec=OCCLUSION_THRESHOLD_SEC)
         self.watchdog      = Watchdog(degrade_sec=HEALTH_DEGRADE_SEC)
         self.heartbeat     = HeartbeatPolicy(interval_sec=HEARTBEAT_SEC)
         self.calib_reminder = CalibrationReminder(
             enabled=STARTUP_NOTIFY, remind_sec=CALIB_REMIND_SEC)
+        self.calib_cond_warner = CalibrationConditionWarner(
+            enabled=STARTUP_NOTIFY, grace_sec=CALIB_COND_GRACE_SEC,
+            remind_sec=CALIB_REMIND_SEC)
         self._frame_ts            = []      # timestamp các frame gần đây → FPS
         self._calib_done_notified = False   # đã gửi "bắt đầu giám sát" chưa (1 lần/phiên)
         # occlusion_start của event đã LƯU ẢNH gần nhất. Dùng để chỉ lưu
@@ -364,8 +357,8 @@ class BabyMonitorV5:
         ts_file = datetime.now().strftime("%Y%m%d_%H%M%S")
         ts_iso  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
-            jpg_path  = EVENTS_DIR / f"possible_suffocation_risk_{ts_file}.jpg"
-            json_path = EVENTS_DIR / f"possible_suffocation_risk_{ts_file}.json"
+            jpg_path  = EVENTS_DIR / f"face_covered_{ts_file}.jpg"
+            json_path = EVENTS_DIR / f"face_covered_{ts_file}.json"
             cv2.imwrite(str(jpg_path), frame)
             extra = {
                 "status": status,
@@ -388,7 +381,7 @@ class BabyMonitorV5:
                     "mouth_votes": int(result.mouth_votes_for_occluded),
                 })
             payload = {
-                "event_type": "possible_suffocation_risk",
+                "event_type": "face_covered",
                 "time": ts_iso,
                 "extra": extra,
             }
@@ -409,43 +402,32 @@ class BabyMonitorV5:
         _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
         jpg_bytes = buf.tobytes()   # giữ bytes để tạo BytesIO mới cho mỗi lần retry
 
-        if trigger == TRIGGER_NO_MOTION:
-            # Cảnh báo bất động — caption khác hẳn occlusion.
-            caption = (
-                f"🚨 *CẢNH BÁO BẤT ĐỘNG — NGHI NGƯNG THỞ!*\n\n"
-                f"⏰ Thời gian: `{ts}`\n"
-                f"⏱ Không thấy cử động: `{elapsed:.1f} giây`\n\n"
-                f"🛑 Không phát hiện cử động/nhịp thở của trẻ trong "
-                f"{NO_MOTION_ALERT_SEC}s.\n"
-                f"👉 *Kiểm tra trẻ NGAY LẬP TỨC!*"
+        if trigger == TRIGGER_FACE_LOST:
+            reason_block = "🫥 Mất hoàn toàn khuôn mặt — nghi bị phủ kín bởi vật lạ"
+        elif result is not None:
+            reason_block = (
+                f"👃 Mũi vote: `{result.nose_votes_for_occluded}/4`  "
+                f"hist=`{result.nose_hist_corr:.2f}` "
+                f"skin=`{result.nose_skin_ratio:.2f}` "
+                f"edge=`{result.nose_edge_density:.3f}` "
+                f"lap=`{result.nose_lap_var:.0f}`\n"
+                f"👄 Miệng vote: `{result.mouth_votes_for_occluded}/4`  "
+                f"hist=`{result.mouth_hist_corr:.2f}` "
+                f"skin=`{result.mouth_skin_ratio:.2f}` "
+                f"edge=`{result.mouth_edge_density:.3f}` "
+                f"lap=`{result.mouth_lap_var:.0f}`"
             )
         else:
-            if trigger == TRIGGER_FACE_LOST:
-                reason_block = "🫥 Mất hoàn toàn khuôn mặt — nghi bị phủ kín bởi vật lạ"
-            elif result is not None:
-                reason_block = (
-                    f"👃 Mũi vote: `{result.nose_votes_for_occluded}/4`  "
-                    f"hist=`{result.nose_hist_corr:.2f}` "
-                    f"skin=`{result.nose_skin_ratio:.2f}` "
-                    f"edge=`{result.nose_edge_density:.3f}` "
-                    f"lap=`{result.nose_lap_var:.0f}`\n"
-                    f"👄 Miệng vote: `{result.mouth_votes_for_occluded}/4`  "
-                    f"hist=`{result.mouth_hist_corr:.2f}` "
-                    f"skin=`{result.mouth_skin_ratio:.2f}` "
-                    f"edge=`{result.mouth_edge_density:.3f}` "
-                    f"lap=`{result.mouth_lap_var:.0f}`"
-                )
-            else:
-                reason_block = "Phát hiện che mũi/miệng"
+            reason_block = "Phát hiện che mũi/miệng"
 
-            caption = (
-                f"🚨 *CẢNH BÁO NGẠT THỞ!*\n\n"
-                f"⏰ Thời gian: `{ts}`\n"
-                f"⏱ Bị che: `{elapsed:.1f} giây`\n\n"
-                f"{reason_block}\n\n"
-                f"⚠️ Mũi/miệng bị che quá {OCCLUSION_THRESHOLD_SEC}s!\n"
-                f"👉 *Kiểm tra trẻ ngay lập tức!*"
-            )
+        caption = (
+            f"🚨 *CẢNH BÁO CHE MŨI/MIỆNG!*\n\n"
+            f"⏰ Thời gian: `{ts}`\n"
+            f"⏱ Bị che: `{elapsed:.1f} giây`\n\n"
+            f"{reason_block}\n\n"
+            f"⚠️ Mũi/miệng bị che quá {OCCLUSION_THRESHOLD_SEC}s!\n"
+            f"👉 *Kiểm tra trẻ ngay lập tức!*"
+        )
 
         # Bot MỚI cho mỗi lần gửi: _dispatch_alert chạy mỗi alert trong 1
         # thread + event loop riêng (asyncio.run). python-telegram-bot v20+
@@ -508,7 +490,7 @@ class BabyMonitorV5:
 
     def _notify_text(self, text: str):
         """Gửi 1 tin nhắn TEXT Telegram ở thread nền (có retry) — dùng cho cảnh
-        báo watchdog/heartbeat. KHÔNG lưu event (không phải sự kiện ngạt thở)."""
+        báo watchdog/heartbeat. KHÔNG lưu event (không phải sự kiện che mũi/miệng)."""
         def _run():
             for attempt, delay in enumerate([0, 3, 8], start=1):
                 if delay:
@@ -527,8 +509,7 @@ class BabyMonitorV5:
         threading.Thread(target=_run, daemon=True).start()
 
     def _dispatch_alert(self, frame, elapsed, result, trigger, save_image=True):
-        status = ("FULLY_COVERED"       if trigger == TRIGGER_FACE_LOST
-                  else "POSSIBLE_NO_MOTION" if trigger == TRIGGER_NO_MOTION
+        status = ("FULLY_COVERED" if trigger == TRIGGER_FACE_LOST
                   else "POSSIBLE_OCCLUSION")
         snap = frame.copy()
         # Chỉ lưu ảnh+json cho alert đầu của event; re-alert chỉ gửi Telegram.
@@ -539,22 +520,6 @@ class BabyMonitorV5:
                 self.send_alert(snap, elapsed, result, trigger)
             ), daemon=True
         ).start()
-
-    # ---------- Motion-absence (nghi bất động / ngưng thở) ----------
-    def _check_motion_absence(self, now, subject_present, frame):
-        """Hỏi MotionAbsencePolicy có cần bắn cảnh báo bất động không, rồi dispatch."""
-        dec = self.motion_policy.step(
-            now=now,
-            subject_present=subject_present,
-            has_motion=self.scene.has_motion,
-            ready=self.scene.motion_threshold is not None,
-        )
-        if dec is None:
-            return
-        print(f"🚨 NGHI BẤT ĐỘNG {dec.elapsed:.1f}s — gửi cảnh báo ngưng thở "
-              f"({'CẢNH BÁO ĐẦU' if dec.is_first else 'RE-ALERT'})")
-        self._dispatch_alert(frame, dec.elapsed, None, TRIGGER_NO_MOTION,
-                             save_image=dec.is_first)
 
     # ---------- Watchdog (tự giám sát, không fail âm thầm) ----------
     def _update_fps(self, now):
@@ -596,6 +561,28 @@ class BabyMonitorV5:
                 "⚠️ *Chưa hiệu chỉnh được* — vẫn chưa thấy mặt trẻ trong khung.\n"
                 "👉 Kiểm tra hướng camera / đưa mặt trẻ vào khung camera."
             )
+
+    def _maybe_warn_calib_conditions(self, now, too_dark, too_blurry):
+        """Đang thấy mặt để hiệu chỉnh nhưng điều kiện kém (tối/mờ) khiến không
+        gom đủ mẫu tốt → Telegram hướng dẫn người dùng khắc phục (headless)."""
+        conditions_bad = too_dark or too_blurry
+        if not self.calib_cond_warner.step(now, calibrating=True,
+                                           conditions_bad=conditions_bad):
+            return
+        if too_dark and too_blurry:
+            detail, fix = ("phòng quá tối *và* hình bị mờ",
+                           "bật thêm đèn và chỉnh lại tiêu cự/khoảng cách camera")
+        elif too_dark:
+            detail, fix = ("phòng quá tối",
+                           "bật thêm đèn cho phòng")
+        else:
+            detail, fix = ("hình bị mờ (camera chưa nét)",
+                           "chỉnh lại tiêu cự/khoảng cách camera và giữ máy cố định")
+        self._notify_text(
+            f"⚠️ *Chưa hiệu chỉnh được — {detail}.*\n"
+            f"👉 Vui lòng {fix}, rồi giữ mặt trẻ trong khung ~5 giây.\n"
+            f"   (Hệ thống đang chờ điều kiện tốt để học chuẩn — sẽ báo khi xong.)"
+        )
 
     def _notify_calibrated(self):
         """Gửi xác nhận 'đã bắt đầu giám sát' — chỉ 1 lần/phiên chạy."""
@@ -669,8 +656,8 @@ class BabyMonitorV5:
                     f"nếu vẫn còn bị che"
                 )
             if trigger == TRIGGER_FACE_LOST:
-                line = (f"{prefix} [{ts}] 🔴 NGUY CƠ NGẠT THỞ — MẤT MẶT, "
-                        f"NGHI BỊ PHỦ KÍN | đã {elapsed:.1f}s, "
+                line = (f"{prefix} [{ts}] 🔴 MẤT MẶT — NGHI BỊ PHỦ KÍN "
+                        f"MŨI/MIỆNG | đã {elapsed:.1f}s, "
                         f"{countdown_txt}")
             else:
                 votes_txt = ""
@@ -694,8 +681,8 @@ class BabyMonitorV5:
         """Reset toàn bộ state để vào lại CALIBRATING."""
         self.detector.reset()
         self.smoother.reset()
-        self.scene.reset()              # xây lại baseline độ nét + motion threshold
-        self.motion_policy.reset()      # quên đồng hồ vắng-cử-động
+        self.scene.reset()              # xây lại baseline độ nét
+        self.calib_cond_warner.reset()  # quên cảnh báo điều kiện hiệu chỉnh
         self.fsm._reset()   # noqa
         self.fsm.last_face_seen = None
         self._safe_streak_start = None
@@ -780,7 +767,7 @@ class BabyMonitorV5:
             else:
                 msg = f"MUI/MIENG BI CHE {elapsed:.1f}s | {tail}"
             color = (0, 80, 255)
-            cv2.putText(frame, ">>> NGUY CO NGAT THO <<<",
+            cv2.putText(frame, ">>> CANH BAO CHE MUI/MIENG <<<",
                         (10, h-10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0,60,255), 2)
         else:
@@ -848,9 +835,6 @@ class BabyMonitorV5:
               f"(set LOG_INTERVAL_SEC để đổi)")
         print(f"   Recal manual     : nhấn R (GUI) hoặc `kill -USR1 <pid>` (headless)")
         print(f"   Blur-gate        : BẬT (drop_frac={BLUR_DROP_FRAC}) — chống false alert do mờ")
-        print(f"   Motion-absence   : "
-              + (f"BẬT sau {NO_MOTION_ALERT_SEC}s vắng cử động" if NO_MOTION_ALERT_SEC > 0
-                 else "TẮT (đặt NO_MOTION_ALERT_SEC=30 để bật)"))
         print(f"   Watchdog         : BẬT (FPS<{HEALTH_MIN_FPS}/tối<{HEALTH_DARK_LUMA}/đơ → cảnh báo sau {HEALTH_DEGRADE_SEC:.0f}s)")
         print(f"   Heartbeat TG     : "
               + (f"mỗi {HEARTBEAT_SEC}s" if HEARTBEAT_SEC > 0 else "TẮT (đặt HEARTBEAT_SEC để bật)"))
@@ -935,20 +919,25 @@ class BabyMonitorV5:
                             calib_start = now
                             print("✅ Phát hiện mặt! Đang calibrate baseline...")
                         calib_remaining = max(0, CALIBRATION_SEC - (now - calib_start))
-                        self.detector.add_calibration_sample(frame, lms, w, h)
-                        # Lúc calibrate cảnh đang CLEAR → học baseline độ nét (blur-gate)
-                        # và mẫu nhiễu chuyển động (motion-absence threshold).
-                        self.scene.update_sharp_baseline()
-                        self.scene.add_calib_motion()
+                        # === Cổng chất lượng calibration ===
+                        # Baseline là "định nghĩa mặt sạch" mà mọi lần phát hiện
+                        # che về sau so sánh với. Học baseline từ frame tối/mờ →
+                        # baseline rác → kém tin cậy ngoài thực địa. Vì vậy CHỈ
+                        # gom mẫu từ frame ĐẠT (đủ sáng + không mờ).
+                        too_dark   = self.scene.luma < HEALTH_DARK_LUMA
+                        too_blurry = self.scene.is_blurry
+                        if not too_dark and not too_blurry:
+                            self.detector.add_calibration_sample(frame, lms, w, h)
+                            self.scene.update_sharp_baseline()
+                        # Headless: điều kiện kém kéo dài → Telegram hướng dẫn fix.
+                        self._maybe_warn_calib_conditions(now, too_dark, too_blurry)
                         if now - calib_start >= CALIBRATION_SEC:
                             ok, msg = self.detector.finalize_calibration()
                             if ok:
                                 calib_done = True
-                                mt = self.scene.finalize_motion_threshold()
+                                self.calib_cond_warner.reset()
                                 print(f"✅ Calibration xong! {msg}\n"
-                                      f"   scene: sharp_baseline={self.scene.sharp_baseline:.0f} "
-                                      f"motion_threshold={mt:.2f}"
-                                      f"{' | motion-absence BẬT' if NO_MOTION_ALERT_SEC>0 else ' | motion-absence TẮT'}")
+                                      f"   scene: sharp_baseline={self.scene.sharp_baseline:.0f}")
                                 self._notify_calibrated()   # xác nhận "bắt đầu giám sát" về Telegram
                                 if self.detector.calibration_quality < MIN_QUALITY_WARN:
                                     print(f"⚠️  Quality={self.detector.calibration_quality:.2f} "
@@ -1060,15 +1049,7 @@ class BabyMonitorV5:
                     if state == STATE_SAFE:
                         self.scene.update_sharp_baseline()
 
-                    # === Motion-absence (nghi bất động) + heartbeat ===
-                    # "Có trẻ trong khung" = thấy mặt, hoặc YOLO thấy người, hoặc
-                    # vừa thấy mặt gần đây (đang bị che vẫn tính là có trẻ).
-                    subject_present = (
-                        face_present or person_seen is True
-                        or (self.fsm.last_face_seen is not None
-                            and now - self.fsm.last_face_seen < FACE_GONE_RESET_SEC)
-                    )
-                    self._check_motion_absence(now, subject_present, frame)
+                    # === Heartbeat "vẫn đang canh" ===
                     self._maybe_heartbeat(now, state)
                     # Nhắc đưa mặt vào khung nếu mãi chưa hiệu chỉnh được.
                     self._maybe_remind_calibration(now, calib_done, face_present)

@@ -25,13 +25,13 @@
 
 > *Câu mở đầu khi giới thiệu với hội đồng. Học thuộc, nói trơn tru.*
 
-**"Đề tài của em là hệ thống cảnh báo nguy cơ ngạt thở ở trẻ sơ sinh bằng AI, chạy trên máy tính nhúng Raspberry Pi 4. Hệ thống dùng camera quan sát trẻ liên tục, dùng MediaPipe để xác định vị trí mũi và miệng, sau đó dùng 4 tín hiệu hình ảnh để bỏ phiếu xem mũi/miệng có bị vật lạ che hay không. Nếu bị che quá 15 giây thì gửi cảnh báo về Telegram cho cha mẹ kèm ảnh chụp tại thời điểm đó. Toàn bộ chạy CPU-only trên Raspberry Pi 4, không cần GPU, hoạt động real-time khoảng 6-8 khung hình mỗi giây ở độ phân giải 640×480."**
+**"Đề tài của em là hệ thống cảnh báo che mũi/miệng ở trẻ sơ sinh bằng AI, chạy trên máy tính nhúng Raspberry Pi 4. Hệ thống dùng camera quan sát trẻ liên tục, dùng MediaPipe để xác định vị trí mũi và miệng, sau đó dùng 4 tín hiệu hình ảnh để bỏ phiếu xem mũi/miệng có bị vật lạ che hay không. Nếu bị che quá 15 giây thì gửi cảnh báo về Telegram cho cha mẹ kèm ảnh chụp tại thời điểm đó. Toàn bộ chạy CPU-only trên Raspberry Pi 4, không cần GPU, hoạt động real-time khoảng 6-8 khung hình mỗi giây ở độ phân giải 640×480."**
 
 ### 4 điểm mạnh để khoe ngay:
 1. **Real-time trên thiết bị nhúng giá rẻ** (Raspberry Pi 4 ~1.5 triệu VND) — không cần cloud, không cần GPU
 2. **Multi-signal voting** — 4 tín hiệu bỏ phiếu chéo, không phụ thuộc 1 model AI duy nhất → robust
 3. **Có state machine + grace period** — tránh false alert khi mặt bị che trong tích tắc
-4. **Thiết kế safety-first + YOLO hỗ trợ** — khi mất mặt thì ưu tiên cảnh báo (thà báo nhầm còn hơn bỏ lọt ngạt thở); YOLO giúp bắt đầu đếm khi thấy người và im lặng khi khung trống
+4. **Thiết kế safety-first + YOLO hỗ trợ** — khi mất mặt thì ưu tiên cảnh báo (thà báo nhầm còn hơn bỏ lọt ca bị che); YOLO giúp bắt đầu đếm khi thấy người và im lặng khi khung trống
 
 ---
 
@@ -47,9 +47,9 @@ baby-ai-alert/
 │   ├── state_machine.py              ← Phòng não: quyết định khi nào alert
 │   ├── occlusion_detector.py         ← Phòng mắt: nhìn và phân tích pixel mũi/miệng
 │   ├── scene_monitor.py              ← Phòng cảm biến: blur-gate + motion + luma
-│   └── alert_policy.py               ← Phòng đồng hồ: timing bất động/watchdog/heartbeat/nhắc
+│   └── alert_policy.py               ← Phòng đồng hồ: timing watchdog/heartbeat/nhắc hiệu chỉnh
 │
-├── tests/                            ← Kho kiểm thử (51 unit test)
+├── tests/                            ← Kho kiểm thử (59 unit test)
 │   ├── test_state_machine.py         (14 test cho FSM)
 │   ├── test_occlusion_detector.py    (16 test cho detector)
 │   ├── test_scene_monitor.py         (7 test cho blur/motion/luma)
@@ -78,7 +78,7 @@ baby-ai-alert/
 
 ### Tại sao chia 3 file mà không gộp 1?
 
-**Câu trả lời chuẩn**: *"Em chia theo nguyên tắc Separation of Concerns. State machine không cần biết về OpenCV hay MediaPipe, nó chỉ nhận input boolean và quyết định state. Detector không cần biết về Telegram hay camera. Tách ra giúp em viết unit test cho state machine mà không cần camera thật — em có 51 test pass 100%. Nếu mai sau đổi từ MediaPipe sang model khác, em chỉ cần thay detector, state machine không phải đụng."*
+**Câu trả lời chuẩn**: *"Em chia theo nguyên tắc Separation of Concerns. State machine không cần biết về OpenCV hay MediaPipe, nó chỉ nhận input boolean và quyết định state. Detector không cần biết về Telegram hay camera. Tách ra giúp em viết unit test cho state machine mà không cần camera thật — em có 59 test pass 100%. Nếu mai sau đổi từ MediaPipe sang model khác, em chỉ cần thay detector, state machine không phải đụng."*
 
 ---
 
@@ -195,7 +195,7 @@ baby-ai-alert/
 | **Laplacian variance (độ chi tiết)** | Lưng bàn tay phẳng, ít chi tiết | (yếu nhất khi ánh sáng đổi đột ngột) |
 
 **Câu phản hồi nếu hội đồng hỏi "tại sao thiết kế thế này"**:
-> *"Em đã test thực tế. Nếu chỉ dùng histogram (cách truyền thống), tay che mặt sẽ không phát hiện được — đây là failure mode nguy hiểm vì ngạt thở do trẻ tự đè tay lên mặt là kịch bản thực tế. Em phát hiện Laplacian variance là discriminator MẠNH NHẤT cho tình huống này: mặt có môi, lỗ mũi, lông mày → lap_var khoảng 1500. Lưng bàn tay phẳng → lap_var chỉ 3-5. Tỷ lệ chênh tới ~400 lần. Đây là phát hiện riêng em rút ra khi quan sát data."*
+> *"Em đã test thực tế. Nếu chỉ dùng histogram (cách truyền thống), tay che mặt sẽ không phát hiện được — đây là failure mode nguy hiểm vì che mũi/miệng do trẻ tự đè tay lên mặt là kịch bản thực tế. Em phát hiện Laplacian variance là discriminator MẠNH NHẤT cho tình huống này: mặt có môi, lỗ mũi, lông mày → lap_var khoảng 1500. Lưng bàn tay phẳng → lap_var chỉ 3-5. Tỷ lệ chênh tới ~400 lần. Đây là phát hiện riêng em rút ra khi quan sát data."*
 
 ### 4.3 Vote rule — bỏ phiếu chéo
 
@@ -267,12 +267,12 @@ class SmoothingBuffer:
 
 **Tại sao có YOLO?**
 
-> *"YOLO không phát hiện bị che — đó là việc của detector chính. YOLO là bộ check PHỤ cho tình huống KHÔNG thấy mặt. Nhưng em theo nguyên tắc SAFETY-FIRST: khi đang thấy mặt mà mặt biến mất → mặc định coi là NGHI BỊ PHỦ KÍN và đếm để báo, KHÔNG để YOLO=False hủy cảnh báo. Vì sao? Camera top-down, trẻ nằm bị chăn phủ → YOLO (train trên người đứng) hay sót → nếu tin 'YOLO không thấy = rời khung' thì BỎ LỌT ca ngạt thở thật.*
+> *"YOLO không phát hiện bị che — đó là việc của detector chính. YOLO là bộ check PHỤ cho tình huống KHÔNG thấy mặt. Nhưng em theo nguyên tắc SAFETY-FIRST: khi đang thấy mặt mà mặt biến mất → mặc định coi là NGHI BỊ PHỦ KÍN và đếm để báo, KHÔNG để YOLO=False hủy cảnh báo. Vì sao? Camera top-down, trẻ nằm bị chăn phủ → YOLO (train trên người đứng) hay sót → nếu tin 'YOLO không thấy = rời khung' thì BỎ LỌT ca bị che thật.*
 > *YOLO chỉ giúp 2 việc an toàn:*
 > - *YOLO thấy CÓ người mà không thấy mặt (trẻ chưa từng track mặt) → BẮT ĐẦU đếm.*
 > - *Khung trống, CHƯA TỪNG thấy mặt → im lặng (NO_FACE), không báo nhầm khi chưa đặt trẻ vào."*
 >
-> *"Đánh đổi em chấp nhận: nếu cha mẹ bế trẻ ra khỏi khung >15s thì vẫn có 1 cảnh báo nhầm — em ưu tiên KHÔNG BAO GIỜ MISS ngạt thở hơn là tránh vài false alarm."*
+> *"Đánh đổi em chấp nhận: nếu cha mẹ bế trẻ ra khỏi khung >15s thì vẫn có 1 cảnh báo nhầm — em ưu tiên KHÔNG BAO GIỜ MISS ca bị che hơn là tránh vài false alarm."*
 
 **Tại sao YOLOv8n (nano) mà không phải s/m/l?**
 > *"Nano là phiên bản nhỏ nhất, 6MB, nhẹ nhất cho CPU. s/m/l chậm hơn nhiều, không real-time được trên Raspberry Pi 4 (không có NPU). Em không cần độ chính xác cao, chỉ cần biết 'có thân người' hay không."*
@@ -290,7 +290,7 @@ class SmoothingBuffer:
 
 **Q1. Em làm đề tài này giải quyết bài toán gì?**
 
-A: *"Em giải quyết bài toán phát hiện nguy cơ ngạt thở ở trẻ sơ sinh. Theo WHO, SIDS (Hội chứng đột tử ở trẻ sơ sinh) là nguyên nhân tử vong hàng đầu ở trẻ <1 tuổi, mà 1 nửa case có liên quan đến chăn/gối phủ kín mặt khi ngủ. Đề tài em tạo ra hệ thống cảnh báo sớm khi mũi/miệng trẻ bị che."*
+A: *"Em giải quyết bài toán phát hiện sớm khi mũi/miệng trẻ sơ sinh bị che (bởi chăn/gối/tay/vật lạ) — một yếu tố nguy cơ gây ngạt khi ngủ. Theo WHO, SIDS (Hội chứng đột tử ở trẻ sơ sinh) là nguyên nhân tử vong hàng đầu ở trẻ <1 tuổi, mà 1 nửa case có liên quan đến chăn/gối phủ kín mặt khi ngủ. Đề tài em tạo ra hệ thống cảnh báo sớm đúng tình huống này — khi mũi/miệng trẻ bị che. Em KHÔNG đo hô hấp/nhịp thở (việc đó cần cảm biến y tế chuyên dụng, ngoài phạm vi đồ án); em phát hiện dấu hiệu quan sát được bằng camera là mũi/miệng bị che."*
 
 **Q2. Sản phẩm của em phục vụ ai?**
 
@@ -425,7 +425,7 @@ A: *"Không cảnh báo ngay. Em có grace period 1.5 giây — mặt mất ch�
 
 **Q31. <u>Làm sao phân biệt 'trẻ rời khung' vs 'bị phủ kín mặt'? Cả hai đều không thấy mặt.</u>**
 
-A: *"Em ưu tiên SAFETY-FIRST. Khi đang thấy mặt mà mặt đột ngột biến mất, em coi đó là NGHI BỊ PHỦ KÍN và đếm 15s rồi báo. Vì sao không tin tuyệt đối vào YOLO để nói 'rời khung'? Vì camera đặt top-down xuống cũi, YOLO train chủ yếu trên người đứng/ngồi → trẻ nằm bị chăn phủ thì YOLO HAY trả 'không có người' sai → nếu tin nó thì em BỎ LỌT đúng ca ngạt thở nguy hiểm nhất. Em chấp nhận báo nhầm khi cha mẹ bế trẻ đi còn hơn miss. YOLO đóng vai phụ: nếu KHÔNG thấy mặt mà YOLO khẳng định CÓ người (trẻ chưa từng được track mặt nhưng nằm trong khung) → bắt đầu đếm; nếu khung trống chưa từng thấy mặt → im lặng (NO_FACE)."*
+A: *"Em ưu tiên SAFETY-FIRST. Khi đang thấy mặt mà mặt đột ngột biến mất, em coi đó là NGHI BỊ PHỦ KÍN và đếm 15s rồi báo. Vì sao không tin tuyệt đối vào YOLO để nói 'rời khung'? Vì camera đặt top-down xuống cũi, YOLO train chủ yếu trên người đứng/ngồi → trẻ nằm bị chăn phủ thì YOLO HAY trả 'không có người' sai → nếu tin nó thì em BỎ LỌT đúng ca bị che nguy hiểm nhất. Em chấp nhận báo nhầm khi cha mẹ bế trẻ đi còn hơn miss. YOLO đóng vai phụ: nếu KHÔNG thấy mặt mà YOLO khẳng định CÓ người (trẻ chưa từng được track mặt nhưng nằm trong khung) → bắt đầu đếm; nếu khung trống chưa từng thấy mặt → im lặng (NO_FACE)."*
 
 **Q32. Có thể vào ALERT mà không cần đếm 15 giây không?**
 
@@ -469,11 +469,12 @@ A: *"Trên Raspberry Pi 4 CPU-only: ~6-8 FPS end-to-end ở 640×480. Breakdown:
 
 **Q40. Em test đề tài thế nào? Có bao nhiêu test case?**
 
-A: *"Em có 51 unit test, chia 4 file:*
+A: *"Em có 59 unit test, chia 5 file:*
 - *test_state_machine.py — 14 test cho FSM: kịch bản safe flow, alert firing, recovery, grace period, YOLO override...*
 - *test_occlusion_detector.py — 16 test cho detector: calibration, blanket/hand detection, blur-gate, stability under landmark drift...*
-- *test_scene_monitor.py — 7 test cho blur-gate + motion + frozen-frame + luma (watchdog).*
-- *test_alert_policy.py — 14 test cho logic timing: motion-absence, watchdog cảnh báo/khôi phục, heartbeat, nhắc hiệu chỉnh.*
+- *test_scene_monitor.py — 5 test cho blur-gate + frozen-frame + luma (watchdog).*
+- *test_alert_policy.py — 13 test cho logic timing: watchdog cảnh báo/khôi phục, heartbeat, nhắc hiệu chỉnh, cảnh báo khi điều kiện hiệu chỉnh kém (tối/mờ).*
+- *test_eval_metrics.py — 11 test cho logic đo lường (precision/recall/FPR/ROC/AUC + chọn ngưỡng tối ưu) dùng cho bộ công cụ đánh giá detector trên dữ liệu thật.*
 *Đặc biệt em có test test_check_on_hand_alerts để đảm bảo case tay che mặt — đây là failure mode khó nhất em đặc biệt verify."*
 
 **Q41. Tỷ lệ false positive / false negative bao nhiêu?**
@@ -496,7 +497,7 @@ A: *"Em đã cài và chạy thực tế trên Raspberry Pi 4. INSTALL_PI4.md gh
 
 **Q44. Em có tài liệu hướng dẫn không?**
 
-A: *"File MD lớn INSTALL_PI4.md hướng dẫn deploy từ A-Z trên Raspberry Pi 4 gồm flash Raspberry Pi OS 64-bit, cài deps, cấu hình, systemd service, troubleshooting. Kèm TEST_RESULTS.md ghi 51 test case và tài liệu bảo vệ này."*
+A: *"File MD lớn INSTALL_PI4.md hướng dẫn deploy từ A-Z trên Raspberry Pi 4 gồm flash Raspberry Pi OS 64-bit, cài deps, cấu hình, systemd service, troubleshooting. Kèm TEST_RESULTS.md ghi 59 test case và tài liệu bảo vệ này."*
 
 ### G. Câu hỏi về tương lai (3 câu)
 
@@ -558,7 +559,7 @@ Kiểm tra:
 ### Kịch bản 5 phút trước hội đồng
 
 **0:00-0:30 — Mở đầu**
-> *"Kính thưa hội đồng, em xin trình bày đề tài 'Hệ thống cảnh báo nguy cơ ngạt thở ở trẻ sơ sinh dùng AI trên thiết bị nhúng'. Em đã chuẩn bị demo trực tiếp. [Bật slide tổng quan]"*
+> *"Kính thưa hội đồng, em xin trình bày đề tài 'Hệ thống cảnh báo che mũi/miệng ở trẻ sơ sinh dùng AI trên thiết bị nhúng'. Em đã chuẩn bị demo trực tiếp. [Bật slide tổng quan]"*
 
 **0:30-1:30 — Giới thiệu kiến trúc**
 
@@ -594,7 +595,7 @@ Show slide chứa 4 tín hiệu, giải thích NGẮN:
 
 **4:00-5:00 — Kết luận**
 
-> *"Tổng kết, đề tài em giải quyết bài toán cảnh báo ngạt thở real-time, 100% local trên Raspberry Pi 4 giá rẻ. Phát hiện multi-signal robust với edge case tay che. Có 51 unit test pass, đã chạy production trên thiết bị thực. Hướng phát triển tiếp theo là gắn Coral USB TPU tăng tốc person detection, thêm IR camera cho ban đêm, và tích hợp relay đã có sẵn để kích còi báo động hardware."*
+> *"Tổng kết, đề tài em giải quyết bài toán cảnh báo che mũi/miệng real-time, 100% local trên Raspberry Pi 4 giá rẻ. Phát hiện multi-signal robust với edge case tay che. Có 59 unit test pass, đã chạy production trên thiết bị thực. Hướng phát triển tiếp theo là gắn Coral USB TPU tăng tốc person detection, thêm IR camera cho ban đêm, và tích hợp relay đã có sẵn để kích còi báo động hardware."*
 >
 > *"Em xin sẵn sàng nhận câu hỏi từ hội đồng."*
 
@@ -627,7 +628,7 @@ Show slide chứa 4 tín hiệu, giải thích NGẮN:
 
 ### Điểm 4: Robust testing
 
-> *"Em có 51 unit test pass 100%. Đặc biệt test_hand_stability_under_landmark_drift mô phỏng MediaPipe nhảy landmark ngẫu nhiên — verify rằng alert vẫn fire ổn định 100% với 9/9 frame dù landmark di chuyển 5-10 pixel."*
+> *"Em có 59 unit test pass 100%. Đặc biệt test_hand_stability_under_landmark_drift mô phỏng MediaPipe nhảy landmark ngẫu nhiên — verify rằng alert vẫn fire ổn định 100% với 9/9 frame dù landmark di chuyển 5-10 pixel."*
 
 ### Điểm 5: Production-ready
 
@@ -641,15 +642,15 @@ Show slide chứa 4 tín hiệu, giải thích NGẮN:
 
 > *"Em thêm 3 lớp nâng chất lượng, đều rẻ CPU (~5ms, module `scene_monitor.py`):*
 > - *Blur-gate: khi cả khung mờ (autofocus hunting / motion blur ở FPS thấp) thì edge/lap tụt về 0 — em phát hiện và BỎ 2 phiếu texture đó, chỉ tin màu+da. Đây là cách em diệt đúng lớp false-positive đã từng gặp. Mấu chốt: che thật chỉ làm mờ vùng mặt, nền vẫn nét → độ nét toàn cục không sụt → không nhầm.*
-> - *Motion-absence: phát hiện vắng cử động (nghi ngưng thở) KỂ CẢ khi mặt không bị che — vì ngạt thở thật có thể không có vật che. Ngưỡng tự calibrate theo nhiễu nền camera; mặc định tắt vì cần tinh chỉnh theo môi trường.*
 > - *Watchdog + heartbeat: thiết bị an toàn KHÔNG được fail âm thầm — em tự giám sát camera đơ / quá tối / FPS sụp và gửi cảnh báo 'giám sát suy giảm', cộng heartbeat định kỳ 'vẫn đang canh'.*
-> - *Thông báo khởi động: lúc bật máy, hệ thống gửi Telegram yêu cầu đưa mặt trẻ vào khung để hiệu chỉnh, nhắc lại nếu quên, và xác nhận khi đã bắt đầu giám sát — phòng trường hợp người dùng quên đặt trẻ/chỉnh camera mà tưởng đã được canh."*
+> - *Thông báo khởi động: lúc bật máy, hệ thống gửi Telegram yêu cầu đưa mặt trẻ vào khung để hiệu chỉnh, nhắc lại nếu quên, và xác nhận khi đã bắt đầu giám sát — phòng trường hợp người dùng quên đặt trẻ/chỉnh camera mà tưởng đã được canh.*
+> - *Cổng chất lượng hiệu chỉnh: baseline là "định nghĩa mặt sạch" mà mọi lần phát hiện che về sau so sánh với, nên em CHỈ học baseline từ frame đủ sáng + không mờ. Nếu phòng quá tối / hình mờ kéo dài, vì máy chạy không màn hình nên em gửi Telegram hướng dẫn cụ thể (bật đèn / chỉnh tiêu cự) và chờ điều kiện tốt thay vì học một baseline rác — đây là cách em tăng độ tin cậy thực địa ngay từ khâu quan trọng nhất."*
 
 ---
 
 ## 8. Câu khó / câu bẫy — cách trả lời an toàn
 
-### Câu khó 1: "Em có chắc 15 giây là an toàn không? Trẻ ngạt thở chết trong bao lâu?"
+### Câu khó 1: "Em có chắc 15 giây là an toàn không? Mũi/miệng bị che bao lâu thì nguy hiểm?"
 
 ❌ **Đừng nói**: "Em chọn vì cảm thấy phù hợp."
 

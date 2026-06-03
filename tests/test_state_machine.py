@@ -129,7 +129,7 @@ def test_face_lost_keeps_realerting_past_gone_reset():
     mặt quay lại.
 
     Lý do: chăn/gối phủ kín → MediaPipe mất tracking + YOLO top-down trả False
-    sai → nếu reset sau gone_reset_sec thì trẻ ngạt thở chỉ nhận 1 cảnh báo rồi
+    sai → nếu reset sau gone_reset_sec thì ca bị che kín chỉ nhận 1 cảnh báo rồi
     im lặng (gửi 1 lần rồi thôi). Phải báo liên tục đến khi parent gỡ vật che.
     """
     fsm = OcclusionStateMachine(threshold_sec=15, grace_sec=1.5, gone_reset_sec=25)
@@ -255,7 +255,7 @@ def test_yolo_person_present_keeps_counting_beyond_grace():
 
 def test_alert_repeats_every_threshold_while_still_occluded():
     """Khi vẫn còn bị che, alert lặp lại đúng mỗi threshold_sec, KHÔNG spam
-    mỗi frame. An toàn cho ngạt thở: cảnh báo liên tục đến khi tình huống
+    mỗi frame. An toàn cho ca bị che: cảnh báo liên tục đến khi tình huống
     được giải quyết (parent gỡ vật che mặt trẻ)."""
     fsm = OcclusionStateMachine(threshold_sec=15)
     fsm.step(now=0.0, face_present=True, occluded_by_histogram=True)

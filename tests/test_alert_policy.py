@@ -9,79 +9,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from alert_policy import (
-    MotionAbsencePolicy, Watchdog, HeartbeatPolicy, CalibrationReminder,
+    Watchdog, HeartbeatPolicy, CalibrationReminder, CalibrationConditionWarner,
 )
-
-
-# ============== MotionAbsencePolicy ==============
-
-def test_motion_absence_disabled():
-    """absent_sec<=0 → không bao giờ bắn."""
-    p = MotionAbsencePolicy(absent_sec=0, repeat_sec=15)
-    for t in range(0, 100):
-        assert p.step(t, subject_present=True, has_motion=False, ready=True) is None
-    print("✅ test_motion_absence_disabled")
-
-
-def test_motion_absence_not_ready():
-    """Chưa calibrate ngưỡng (ready=False) → không bắn dù vắng cử động."""
-    p = MotionAbsencePolicy(absent_sec=30, repeat_sec=15)
-    for t in range(0, 100):
-        assert p.step(t, subject_present=True, has_motion=False, ready=False) is None
-    print("✅ test_motion_absence_not_ready")
-
-
-def test_motion_absence_fires_after_threshold():
-    """Vắng cử động đủ 30s (có trẻ, ready) → bắn cảnh báo đầu đúng mốc."""
-    p = MotionAbsencePolicy(absent_sec=30, repeat_sec=15)
-    fired = []
-    t = 0.0
-    while t < 35.0:
-        d = p.step(t, subject_present=True, has_motion=False, ready=True)
-        if d:
-            fired.append(round(t, 1))
-        t += 1.0
-    assert fired == [30.0], f"Phải bắn 1 lần tại t=30, got {fired}"
-    print("✅ test_motion_absence_fires_after_threshold")
-
-
-def test_motion_absence_resets_on_motion():
-    """Có cử động giữa chừng → reset đồng hồ; phải đếm lại 30s từ lúc đó."""
-    p = MotionAbsencePolicy(absent_sec=30, repeat_sec=15)
-    for t in range(0, 20):
-        assert p.step(t, subject_present=True, has_motion=False, ready=True) is None
-    # có cử động tại t=20 → reset đồng hồ về 20
-    assert p.step(20, subject_present=True, has_motion=True, ready=True) is None
-    fired = []
-    for t in range(21, 52):
-        d = p.step(t, subject_present=True, has_motion=False, ready=True)
-        if d:
-            fired.append(t)
-    assert fired == [50], f"Reset ở t=20 → đủ 30 tại t=50, got {fired}"
-    print("✅ test_motion_absence_resets_on_motion")
-
-
-def test_motion_absence_resets_when_subject_absent():
-    """Không có trẻ trong khung → không tính bất động (reset)."""
-    p = MotionAbsencePolicy(absent_sec=30, repeat_sec=15)
-    for t in range(0, 100):
-        assert p.step(t, subject_present=False, has_motion=False, ready=True) is None
-    print("✅ test_motion_absence_resets_when_subject_absent")
-
-
-def test_motion_absence_re_alerts_every_repeat():
-    """Sau cảnh báo đầu (t=30), re-alert mỗi 15s khi vẫn bất động."""
-    p = MotionAbsencePolicy(absent_sec=30, repeat_sec=15)
-    fired = []
-    t = 0.0
-    while t < 75.0:
-        d = p.step(t, subject_present=True, has_motion=False, ready=True)
-        if d:
-            fired.append(round(t, 1))
-        t += 0.5
-    # đầu tại 30, re-alert 45, 60 (75 là biên)
-    assert fired == [30.0, 45.0, 60.0], f"got {fired}"
-    print(f"✅ test_motion_absence_re_alerts_every_repeat  ({fired})")
 
 
 # ============== Watchdog ==============
@@ -189,16 +118,69 @@ def test_calib_reminder_silent_when_face_or_done():
     print("✅ test_calib_reminder_silent_when_face_or_done")
 
 
+# ============== CalibrationConditionWarner ==============
+
+def test_calib_warner_disabled():
+    """enabled=False → không bao giờ nhắc dù điều kiện kém kéo dài."""
+    w = CalibrationConditionWarner(enabled=False, grace_sec=4, remind_sec=60)
+    for t in range(0, 200):
+        assert w.step(t, calibrating=True, conditions_bad=True) is False
+    print("✅ test_calib_warner_disabled")
+
+
+def test_calib_warner_silent_when_conditions_good():
+    """Điều kiện tốt → không nhắc."""
+    w = CalibrationConditionWarner(enabled=True, grace_sec=4, remind_sec=60)
+    for t in range(0, 200):
+        assert w.step(t, calibrating=True, conditions_bad=False) is False
+    print("✅ test_calib_warner_silent_when_conditions_good")
+
+
+def test_calib_warner_silent_when_not_calibrating():
+    """Không trong pha hiệu chỉnh → không nhắc dù điều kiện kém."""
+    w = CalibrationConditionWarner(enabled=True, grace_sec=4, remind_sec=60)
+    for t in range(0, 200):
+        assert w.step(t, calibrating=False, conditions_bad=True) is False
+    print("✅ test_calib_warner_silent_when_not_calibrating")
+
+
+def test_calib_warner_warns_after_grace_then_repeats():
+    """Điều kiện kém liên tục → nhắc lần đầu sau grace (4s), lặp mỗi 60s."""
+    w = CalibrationConditionWarner(enabled=True, grace_sec=4, remind_sec=60)
+    fired = []
+    t = 0.0
+    while t < 130.0:
+        if w.step(t, calibrating=True, conditions_bad=True):
+            fired.append(round(t, 1))
+        t += 1.0
+    # mốc xấu đặt ở t=0; nhắc đầu tại t=4 (đủ grace), rồi 64, 124
+    assert fired == [4.0, 64.0, 124.0], f"got {fired}"
+    print(f"✅ test_calib_warner_warns_after_grace_then_repeats  ({fired})")
+
+
+def test_calib_warner_resets_when_conditions_recover():
+    """Kém một lúc (chưa quá grace) rồi tốt lại → quên; kém lại phải chờ grace từ đầu."""
+    w = CalibrationConditionWarner(enabled=True, grace_sec=4, remind_sec=60)
+    # kém 2s (chưa đủ grace)
+    assert w.step(0, calibrating=True, conditions_bad=True) is False
+    assert w.step(2, calibrating=True, conditions_bad=True) is False
+    # tốt lại tại t=3 → reset mốc
+    assert w.step(3, calibrating=True, conditions_bad=False) is False
+    # kém lại từ t=5 → mốc đặt lại ở 5, nhắc đầu tại 5+4=9
+    fired = []
+    t = 5.0
+    while t < 12.0:
+        if w.step(t, calibrating=True, conditions_bad=True):
+            fired.append(round(t, 1))
+        t += 1.0
+    assert fired == [9.0], f"Phải chờ lại grace từ lúc kém lại, got {fired}"
+    print("✅ test_calib_warner_resets_when_conditions_recover")
+
+
 # ============== runner ==============
 
 if __name__ == "__main__":
     tests = [
-        test_motion_absence_disabled,
-        test_motion_absence_not_ready,
-        test_motion_absence_fires_after_threshold,
-        test_motion_absence_resets_on_motion,
-        test_motion_absence_resets_when_subject_absent,
-        test_motion_absence_re_alerts_every_repeat,
         test_watchdog_alert_only_after_degrade_sec,
         test_watchdog_recover_after_alert,
         test_watchdog_no_recover_if_never_alerted,
@@ -207,6 +189,11 @@ if __name__ == "__main__":
         test_calib_reminder_disabled,
         test_calib_reminder_reminds_when_no_face,
         test_calib_reminder_silent_when_face_or_done,
+        test_calib_warner_disabled,
+        test_calib_warner_silent_when_conditions_good,
+        test_calib_warner_silent_when_not_calibrating,
+        test_calib_warner_warns_after_grace_then_repeats,
+        test_calib_warner_resets_when_conditions_recover,
     ]
     failed = 0
     for t in tests:

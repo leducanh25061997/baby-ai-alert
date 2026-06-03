@@ -6,9 +6,10 @@ Báo cáo các test case đã viết và **đều PASS** tính đến lần ch�
 |---|:-:|:-:|:-:|
 | `tests/test_state_machine.py` | 14 | ✅ 14 | 0 |
 | `tests/test_occlusion_detector.py` | 16 | ✅ 16 | 0 |
-| `tests/test_scene_monitor.py` | 7 | ✅ 7 | 0 |
-| `tests/test_alert_policy.py` | 14 | ✅ 14 | 0 |
-| **Tổng** | **51** | **51** | **0** |
+| `tests/test_scene_monitor.py` | 5 | ✅ 5 | 0 |
+| `tests/test_alert_policy.py` | 13 | ✅ 13 | 0 |
+| `tests/test_eval_metrics.py` | 11 | ✅ 11 | 0 |
+| **Tổng** | **59** | **59** | **0** |
 
 Lệnh chạy lại:
 ```bash
@@ -20,9 +21,10 @@ PYTHONIOENCODING=utf-8 python tests/test_alert_policy.py
 
 > Bổ sung mới:
 > - `test_occlusion_detector`: thêm `test_blur_gate_suppresses_texture_votes` (bỏ phiếu edge/lap khi mờ).
-> - `test_scene_monitor` (7): blur-gate, motion threshold/has_motion, frozen-frame, luma — [src/scene_monitor.py](src/scene_monitor.py).
-> - `test_alert_policy` (14): logic timing thuần tách khỏi main.py — motion-absence,
->   watchdog (cảnh báo/khôi phục), heartbeat, calibration-reminder — [src/alert_policy.py](src/alert_policy.py).
+> - `test_scene_monitor` (5): blur-gate, frozen-frame, luma — [src/scene_monitor.py](src/scene_monitor.py).
+> - `test_alert_policy` (13): logic timing thuần tách khỏi main.py —
+>   watchdog (cảnh báo/khôi phục), heartbeat, calibration-reminder, calibration-condition-warner (báo khi tối/mờ) — [src/alert_policy.py](src/alert_policy.py).
+> - `test_eval_metrics` (11): logic đo thuần — precision/recall/FPR, ROC/AUC, chọn ngưỡng tối ưu — [src/eval_metrics.py](src/eval_metrics.py). Phục vụ bộ công cụ đánh giá (Hướng A, xem [EVAL_HARNESS.md](EVAL_HARNESS.md)).
 
 ---
 
@@ -45,7 +47,7 @@ Test FSM (`OcclusionStateMachine`) phụ trách quyết định `SAFE / ALERT / 
 ### A.4 `test_face_lost_critical_bug_fix` ⭐ ✅
 **Bug được fix**: trước đây khi mặt bị **phủ kín** (face_mesh không thấy mặt nữa), code reset bộ đếm → KHÔNG BAO GIỜ alert ở kịch bản nguy hiểm nhất.
 **Test**: t=0 thấy mặt → t=0.5 mất mặt → mọi frame sau vẫn đếm tiếp → t=15.0 → ALERT.
-**Coverage**: kịch bản ngạt thở nghiêm trọng nhất (chăn phủ kín mặt).
+**Coverage**: kịch bản che mũi/miệng nghiêm trọng nhất (chăn phủ kín mặt).
 
 ### A.5 `test_face_lost_briefly_then_returns_no_alert` ✅
 **Mục đích**: Mặt mất 0.5s rồi quay lại sạch → KHÔNG được false alert.
