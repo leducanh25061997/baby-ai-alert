@@ -287,8 +287,11 @@ class OcclusionDetector:
         mouth_hist_v = mouth_corr               < self.mouth.hist_threshold
         mouth_votes  = int(mouth_skin_v) + int(mouth_hist_v)
 
-        # Che khi BẤT KỲ vùng nào (mũi/miệng) mất màu da.
-        occluded = nose_skin_v or mouth_skin_v
+        # Che khi CẢ HAI vùng (mũi VÀ miệng) cùng mất màu da. Yêu cầu đồng thời
+        # → loại báo nhầm khi chỉ 1 vùng tụt skin oan (ví dụ mặt người lớn có
+        # râu/môi sẫm làm vùng miệng tụt skin dù mặt nhìn rõ). Vật che thật
+        # (chăn/gối/khăn) thường phủ cả mũi lẫn miệng → cả hai cùng tụt.
+        occluded = nose_skin_v and mouth_skin_v
 
         if occluded or prev_in_alert:
             self._frames_since_last_alert = 0
