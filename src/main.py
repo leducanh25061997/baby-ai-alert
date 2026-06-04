@@ -619,7 +619,7 @@ class BabyMonitorV5:
             elif person_seen is False:
                 yolo_note = " | YOLO: không thấy ai"
             line = (f"{prefix} [{ts}] ⚪ KHÔNG THẤY AI TRONG KHUNG — "
-                    f"đã {elapsed:.1f}s{yolo_note}, {_countdown(NO_PERSON_SEC)}")
+                    f"đã {elapsed:.1f}s{yolo_note} (không gửi cảnh báo)")
 
         elif state == STATE_SAFE:
             extra = ""
@@ -732,7 +732,7 @@ class BabyMonitorV5:
             progress = 1.0 - (calib_remaining / CALIBRATION_SEC)
             cv2.rectangle(frame, (0, h-5), (int(w*progress), h), (0,200,255), -1)
         elif state == STATE_NO_PERSON:
-            msg   = f"KHONG THAY AI {elapsed:.1f}s | {_tail(NO_PERSON_SEC)}"
+            msg   = f"KHONG THAY AI {elapsed:.1f}s (khong canh bao)"
             color = (0, 140, 255)
             cv2.putText(frame, ">>> KHONG THAY AI TRONG KHUNG <<<",
                         (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0,140,255), 2)
@@ -788,13 +788,14 @@ class BabyMonitorV5:
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
 
         print("🟢 Baby Monitor V5")
-        print(f"   Phát hiện        : CHE mũi/miệng (skin+histogram) + MẤT NGƯỜI")
+        print(f"   Phát hiện        : CHE mũi/miệng (skin+histogram) "
+              f"[mất người chỉ hiển thị, KHÔNG cảnh báo]")
         print(f"   Camera           : {src} → {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
         print(f"   Autofocus        : {'BẬT' if CAMERA_AUTOFOCUS else 'TẮT'} "
               f"(CAMERA_AUTOFOCUS để đổi)")
         print(f"   Calibration      : {CALIBRATION_SEC}s")
         print(f"   Báo che sau      : {OCCLUSION_THRESHOLD_SEC}s")
-        print(f"   Báo mất người sau: {NO_PERSON_SEC}s (giữ presence {PRESENCE_HOLD_SEC:.1f}s)")
+        print(f"   Mất người        : KHÔNG cảnh báo (giữ presence {PRESENCE_HOLD_SEC:.1f}s)")
         print(f"   Auto-recal       : sau {AUTO_RECAL_AFTER_SEC}s safe liên tục"
               if AUTO_RECAL_AFTER_SEC > 0 else "   Auto-recal       : tắt")
         print(f"   Events lưu tại   : {EVENTS_DIR}")

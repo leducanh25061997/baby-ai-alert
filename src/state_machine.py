@@ -1,10 +1,11 @@
-"""State machine ĐƠN GIẢN — chỉ 2 sự kiện cần báo:
+"""State machine ĐƠN GIẢN — chỉ 1 sự kiện cần BÁO:
 
   1. CHE mũi/miệng     : có người + vùng mũi/miệng bị che ≥ threshold → báo.
-  2. MẤT NGƯỜI         : không thấy ai trong khung ≥ no_person_sec → báo.
 
-KHÔNG còn khái niệm "ngạt thở / nghi bị phủ kín". Mất người chỉ là thông báo
-sự việc ("không thấy ai trong khung"), không suy diễn nguy hiểm.
+Trạng thái MẤT NGƯỜI (không thấy ai trong khung) vẫn được theo dõi để
+log/UI hiển thị, NHƯNG không còn gửi cảnh báo (should_alert luôn False).
+
+KHÔNG còn khái niệm "ngạt thở / nghi bị phủ kín".
 
 Mỗi sự kiện: bắn lần đầu khi đủ ngưỡng thời gian, sau đó lặp lại mỗi
 `repeat_sec` đến khi tình huống hết. Có anti-flicker để 1 frame nhiễu không
@@ -106,15 +107,15 @@ class OcclusionStateMachine:
     ) -> StepResult:
 
         # === Không thấy người ===
+        # KHÔNG còn gửi cảnh báo "mất người". Vẫn giữ STATE_NO_PERSON + đếm
+        # elapsed để log/UI hiển thị "không thấy ai", nhưng should_alert luôn
+        # False (không Telegram, không lưu ảnh cho tình huống này).
         if not person_present:
             self._reset_covered()
             if self.absent_start is None:
                 self.absent_start = now
-            elapsed, should, self.absent_last_alert = self._maybe_fire(
-                now, self.absent_start, self.absent_last_alert,
-                self.no_person_sec, self.repeat_sec,
-            )
-            return StepResult(STATE_NO_PERSON, elapsed, should, TRIGGER_NO_PERSON)
+            elapsed = now - self.absent_start
+            return StepResult(STATE_NO_PERSON, elapsed, False, TRIGGER_NO_PERSON)
 
         # === Có người ===
         self._reset_absent()

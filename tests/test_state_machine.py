@@ -71,8 +71,9 @@ def test_covered_repeats_every_threshold():
     print("✅ test_covered_repeats_every_threshold")
 
 
-def test_no_person_fires_at_threshold():
-    """Không thấy ai 15s → báo 'mất người'."""
+def test_no_person_never_alerts():
+    """Mất người: vào STATE_NO_PERSON + đếm elapsed để hiển thị, NHƯNG
+    KHÔNG bao giờ gửi cảnh báo (đã bỏ logic cảnh báo mất người)."""
     fsm = OcclusionStateMachine(no_person_sec=15)
     r = fsm.step(now=0.0, person_present=False, covered=False)
     assert r.state == STATE_NO_PERSON
@@ -81,22 +82,24 @@ def test_no_person_fires_at_threshold():
     r = fsm.step(now=14.9, person_present=False, covered=False)
     assert not r.should_alert
     r = fsm.step(now=15.0, person_present=False, covered=False)
-    assert r.should_alert and r.trigger == TRIGGER_NO_PERSON
-    print("✅ test_no_person_fires_at_threshold")
+    assert not r.should_alert, "Mất người KHÔNG được báo"
+    assert r.state == STATE_NO_PERSON
+    assert abs(r.elapsed - 15.0) < 1e-9, "Vẫn đếm elapsed để hiển thị"
+    print("✅ test_no_person_never_alerts")
 
 
-def test_no_person_repeats():
-    """Mất người kéo dài → nhắc lại mỗi chu kỳ."""
+def test_no_person_never_alerts_long():
+    """Mất người kéo dài rất lâu → vẫn KHÔNG có cảnh báo nào."""
     fsm = OcclusionStateMachine(no_person_sec=15)
     fired = []
     t = 0.0
-    while t < 47.0:
+    while t < 120.0:
         r = fsm.step(now=t, person_present=False, covered=False)
         if r.should_alert:
             fired.append(round(t, 1))
         t += 0.1
-    assert len(fired) == 3, f"Phải nhắc 3 lần (~15,30,45); thực tế {fired}"
-    print("✅ test_no_person_repeats")
+    assert len(fired) == 0, f"Không được báo lần nào; thực tế {fired}"
+    print("✅ test_no_person_never_alerts_long")
 
 
 def test_person_returns_clears_no_person():
@@ -160,8 +163,8 @@ if __name__ == "__main__":
         test_covered_alert_fires_at_threshold,
         test_covered_recovery_anti_flicker,
         test_covered_repeats_every_threshold,
-        test_no_person_fires_at_threshold,
-        test_no_person_repeats,
+        test_no_person_never_alerts,
+        test_no_person_never_alerts_long,
         test_person_returns_clears_no_person,
         test_lost_person_clears_covered,
         test_covered_only_when_person_present,
