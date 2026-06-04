@@ -109,8 +109,22 @@ TELEGRAM_TOKEN = os.environ.get(
 )
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7316578932")
 
+# Bot THỨ 2 (tuỳ chọn) — đặt TELEGRAM_TOKEN_2 + TELEGRAM_CHAT_ID_2 trong .env
+# để cảnh báo gửi tới CẢ con bot này (token + chat riêng của nó).
+TELEGRAM_TOKEN_2 = os.environ.get(
+    "TELEGRAM_TOKEN_2",
+    "8747902161:AAHgnWFVVctQGSVQ4BSVpY6l7A9p9RzYdBU",
+)
+CHAT_ID_2        = os.environ.get("TELEGRAM_CHAT_ID_2", "7107683359")
+
+# Danh sách (token, chat_id) sẽ nhận MỌI cảnh báo. Bot 2 chỉ thêm vào khi đã
+# cấu hình đủ token+chat → các hàm gửi chỉ cần lặp qua list này.
+TELEGRAM_TARGETS = [(TELEGRAM_TOKEN, CHAT_ID)]
+if TELEGRAM_TOKEN_2 and CHAT_ID_2:
+    TELEGRAM_TARGETS.append((TELEGRAM_TOKEN_2, CHAT_ID_2))
+
 # Che mũi/miệng kéo dài bao lâu thì gửi thông báo.
-OCCLUSION_THRESHOLD_SEC = int(os.environ.get("OCCLUSION_THRESHOLD_SEC", "15"))
+OCCLUSION_THRESHOLD_SEC = int(os.environ.get("OCCLUSION_THRESHOLD_SEC", "10"))
 # Không thấy ai trong khung kéo dài bao lâu thì gửi thông báo "mất người".
 NO_PERSON_SEC           = int(os.environ.get("NO_PERSON_SEC", "15"))
 # Giữ trạng thái "có người" thêm bao lâu sau khi MẤT tín hiệu (mặt + YOLO) →
@@ -422,10 +436,19 @@ class BabyMonitorV5:
         # crash, khiến chỉ alert đầu tiên tới được Telegram. Bot mới mỗi lần
         # → client bind đúng loop hiện tại → mọi re-alert đều gửi được.
         #
-        # RETRY + BACKOFF: lúc autostart, alert đầu có thể fire khi WiFi/DNS
-        # chưa sẵn (network-online chưa có) → send_photo timeout. Thay vì bỏ
-        # luôn alert (gây "rất lâu mới tới Telegram"), thử lại với backoff tới
-        # khi mạng lên. Tạo BytesIO mới mỗi lần (lần trước đã bị đọc cạn).
+        # Gửi tới MỌI bot song song (mỗi bot tự retry độc lập) → 1 bot lỗi
+        # mạng không chặn bot kia.
+        await asyncio.gather(*[
+            self._send_photo_to(token, chat_id, jpg_bytes, caption, ts)
+            for token, chat_id in TELEGRAM_TARGETS
+        ])
+
+    async def _send_photo_to(self, token, chat_id, jpg_bytes, caption, ts):
+        """Gửi 1 ảnh cảnh báo tới 1 bot (token+chat) — có retry+backoff.
+
+        RETRY + BACKOFF: lúc autostart, alert đầu có thể fire khi WiFi/DNS chưa
+        sẵn → send_photo timeout. Thử lại với backoff tới khi mạng lên. Tạo
+        BytesIO mới mỗi lần (lần trước đã bị đọc cạn)."""
         delays = [0, 2, 5, 10, 20]   # tổng ~37s, đủ chờ WiFi/DNS lên sau boot
         for attempt, delay in enumerate(delays, start=1):
             if delay:
@@ -433,20 +456,21 @@ class BabyMonitorV5:
             try:
                 img_io = io.BytesIO(jpg_bytes)
                 img_io.name = 'alert.jpg'
-                async with Bot(token=TELEGRAM_TOKEN) as bot:
+                async with Bot(token=token) as bot:
                     await bot.send_photo(
-                        chat_id=CHAT_ID, photo=img_io,
+                        chat_id=chat_id, photo=img_io,
                         caption=caption, parse_mode='Markdown',
                         read_timeout=20, write_timeout=20,
                         connect_timeout=20,
                     )
                 suffix = f" (lần thử {attempt})" if attempt > 1 else ""
-                print(f"[{ts}] ✅ Đã gửi cảnh báo Telegram!{suffix}")
-                return
+                print(f"[{ts}] ✅ Đã gửi cảnh báo Telegram → chat {chat_id}!{suffix}")
+                return True
             except Exception as e:
-                print(f"❌ Lỗi Telegram (thử {attempt}/{len(delays)}): {e}")
-        print("❌ Gửi Telegram thất bại sau nhiều lần — ảnh vẫn đã lưu local "
-              "trong events/ (xem lại khi có mạng).")
+                print(f"❌ Lỗi Telegram chat {chat_id} (thử {attempt}/{len(delays)}): {e}")
+        print(f"❌ Gửi Telegram chat {chat_id} thất bại sau nhiều lần — ảnh vẫn "
+              "đã lưu local trong events/ (xem lại khi có mạng).")
+        return False
 
     def _warmup_telegram(self):
         """Hâm nóng kết nối Telegram ở thread nền lúc khởi động.
@@ -455,14 +479,14 @@ class BabyMonitorV5:
         này gọi getMe lặp lại tới khi được → vừa xác thực token, vừa làm ấm
         DNS/TLS để alert ĐẦU tiên sau đó gửi tức thì thay vì phải chờ mạng.
         Không chặn main loop (detection vẫn chạy bình thường)."""
-        def _run():
+        def _run_one(token):
             delay = 3
             for attempt in range(1, 13):   # ~ vài phút với backoff
                 if self._shutdown.is_set():
                     return
                 try:
                     async def _check():
-                        async with Bot(token=TELEGRAM_TOKEN) as bot:
+                        async with Bot(token=token) as bot:
                             return (await bot.get_me()).username
                     name = asyncio.run(_check())
                     print(f"✅ Telegram sẵn sàng (bot @{name}) — kết nối đã hâm nóng.")
@@ -472,27 +496,33 @@ class BabyMonitorV5:
                     time.sleep(delay)
                     delay = min(delay * 2, 30)
             print("⚠️ Warm-up Telegram chưa xong sau nhiều lần — alert sẽ tự retry khi fire.")
-        threading.Thread(target=_run, daemon=True).start()
+        # Hâm nóng từng bot ở 1 thread riêng.
+        for token, _chat_id in TELEGRAM_TARGETS:
+            threading.Thread(target=_run_one, args=(token,), daemon=True).start()
 
     def _notify_text(self, text: str):
         """Gửi 1 tin nhắn TEXT Telegram ở thread nền (có retry) — dùng cho cảnh
         báo watchdog/heartbeat. KHÔNG lưu event (không phải sự kiện che mũi/miệng)."""
-        def _run():
+        def _run_one(token, chat_id):
             for attempt, delay in enumerate([0, 3, 8], start=1):
                 if delay:
                     time.sleep(delay)
                 try:
                     async def _send():
-                        async with Bot(token=TELEGRAM_TOKEN) as bot:
+                        async with Bot(token=token) as bot:
                             await bot.send_message(
-                                chat_id=CHAT_ID, text=text, parse_mode='Markdown',
+                                chat_id=chat_id, text=text, parse_mode='Markdown',
                                 read_timeout=15, write_timeout=15, connect_timeout=15,
                             )
                     asyncio.run(_send())
                     return
                 except Exception as e:
-                    print(f"❌ Lỗi gửi text Telegram (thử {attempt}): {type(e).__name__}")
-        threading.Thread(target=_run, daemon=True).start()
+                    print(f"❌ Lỗi gửi text Telegram chat {chat_id} "
+                          f"(thử {attempt}): {type(e).__name__}")
+        # 1 thread/bot → các bot gửi độc lập, không chặn nhau.
+        for token, chat_id in TELEGRAM_TARGETS:
+            threading.Thread(target=_run_one, args=(token, chat_id),
+                             daemon=True).start()
 
     def _dispatch_alert(self, frame, elapsed, result, trigger, save_image=True):
         status = ("NO_PERSON" if trigger == TRIGGER_NO_PERSON
