@@ -10,8 +10,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from state_machine import (
     OcclusionStateMachine,
-    STATE_SAFE, STATE_COVERED, STATE_NO_PERSON,
-    TRIGGER_COVERED, TRIGGER_NO_PERSON,
+    STATE_SAFE, STATE_COVERED, STATE_FACE_LOST, STATE_NO_PERSON,
+    TRIGGER_COVERED, TRIGGER_FACE_LOST, TRIGGER_NO_PERSON,
 )
 
 
@@ -146,6 +146,76 @@ def test_no_alert_before_threshold_then_safe():
     print("✅ test_no_alert_before_threshold_then_safe")
 
 
+def test_face_lost_fires_at_threshold():
+    """Có người (YOLO) nhưng MẤT MẶT 15s → báo FACE_LOST."""
+    fsm = OcclusionStateMachine(face_lost_sec=15)
+    r = fsm.step(now=0.0, person_present=True, covered=False, face_present=False)
+    assert r.state == STATE_FACE_LOST and r.trigger == TRIGGER_FACE_LOST
+    assert not r.should_alert
+    r = fsm.step(now=14.9, person_present=True, covered=False, face_present=False)
+    assert not r.should_alert
+    r = fsm.step(now=15.0, person_present=True, covered=False, face_present=False)
+    assert r.should_alert and r.trigger == TRIGGER_FACE_LOST
+    r = fsm.step(now=15.1, person_present=True, covered=False, face_present=False)
+    assert not r.should_alert, "Không bắn lại trong cùng chu kỳ"
+    print("✅ test_face_lost_fires_at_threshold")
+
+
+def test_face_present_is_safe():
+    """Có người + thấy mặt + không che → SAFE (không kích nhánh mất mặt)."""
+    fsm = OcclusionStateMachine(face_lost_sec=15)
+    r = fsm.step(now=5.0, person_present=True, covered=False, face_present=True)
+    assert r.state == STATE_SAFE and not r.should_alert
+    print("✅ test_face_present_is_safe")
+
+
+def test_face_lost_disabled():
+    """face_lost_sec=0 → mất mặt KHÔNG bao giờ báo (về SAFE)."""
+    fsm = OcclusionStateMachine(face_lost_sec=0)
+    fired = []
+    t = 0.0
+    while t < 60.0:
+        r = fsm.step(now=t, person_present=True, covered=False, face_present=False)
+        if r.should_alert:
+            fired.append(round(t, 1))
+        assert r.state == STATE_SAFE, r.state
+        t += 0.1
+    assert len(fired) == 0, f"Tắt nhánh mất mặt mà vẫn báo: {fired}"
+    print("✅ test_face_lost_disabled")
+
+
+def test_face_lost_recovery_anti_flicker():
+    """Mất mặt rồi mặt hiện lại → reset SAU khi thấy mặt đủ lâu (anti-flicker)."""
+    fsm = OcclusionStateMachine(face_lost_sec=15, safe_recovery_sec=1.5)
+    fsm.step(now=0.0, person_present=True, covered=False, face_present=False)
+    fsm.step(now=10.0, person_present=True, covered=False, face_present=False)
+    r = fsm.step(now=10.5, person_present=True, covered=False, face_present=True)
+    assert r.state == STATE_FACE_LOST, "0.5s thấy mặt chưa đủ để reset"
+    assert fsm.facelost_start is not None
+    r = fsm.step(now=12.0, person_present=True, covered=False, face_present=True)
+    assert r.state == STATE_SAFE
+    assert fsm.facelost_start is None
+    print("✅ test_face_lost_recovery_anti_flicker")
+
+
+def test_covered_takes_priority_over_face_lost():
+    """covered=True luôn ưu tiên hơn mất mặt (cùng là nguy cơ đường thở)."""
+    fsm = OcclusionStateMachine(threshold_sec=10, face_lost_sec=15)
+    r = fsm.step(now=0.0, person_present=True, covered=True, face_present=False)
+    assert r.state == STATE_COVERED and r.trigger == TRIGGER_COVERED
+    assert fsm.facelost_start is None
+    print("✅ test_covered_takes_priority_over_face_lost")
+
+
+def test_face_lost_needs_person():
+    """Mất mặt nhưng cũng mất người → NO_PERSON (không báo mất mặt)."""
+    fsm = OcclusionStateMachine(face_lost_sec=15)
+    r = fsm.step(now=0.0, person_present=False, covered=False, face_present=False)
+    assert r.state == STATE_NO_PERSON and not r.should_alert
+    assert fsm.facelost_start is None
+    print("✅ test_face_lost_needs_person")
+
+
 def test_backward_compat_properties():
     """occlusion_start / last_alert_at vẫn dùng được cho UI countdown."""
     fsm = OcclusionStateMachine(threshold_sec=15)
@@ -169,6 +239,12 @@ if __name__ == "__main__":
         test_lost_person_clears_covered,
         test_covered_only_when_person_present,
         test_no_alert_before_threshold_then_safe,
+        test_face_lost_fires_at_threshold,
+        test_face_present_is_safe,
+        test_face_lost_disabled,
+        test_face_lost_recovery_anti_flicker,
+        test_covered_takes_priority_over_face_lost,
+        test_face_lost_needs_person,
         test_backward_compat_properties,
     ]
     failed = 0

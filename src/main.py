@@ -75,8 +75,8 @@ from telegram import Bot
 
 from state_machine import (
     OcclusionStateMachine,
-    STATE_SAFE, STATE_COVERED, STATE_NO_PERSON,
-    TRIGGER_COVERED, TRIGGER_NO_PERSON,
+    STATE_SAFE, STATE_COVERED, STATE_FACE_LOST, STATE_NO_PERSON,
+    TRIGGER_COVERED, TRIGGER_FACE_LOST, TRIGGER_NO_PERSON,
 )
 from occlusion_detector import (
     OcclusionDetector, CheckResult,
@@ -89,6 +89,14 @@ STATE_CALIBRATING = "CALIBRATING"
 from scene_monitor import SceneMonitor
 from alert_policy import (
     Watchdog, HeartbeatPolicy, CalibrationReminder, CalibrationConditionWarner,
+)
+from facelost_policy import (
+    estimate_yaw_proxy, classify_face_loss, face_lost_severity,
+    MANNER_TURNED, MANNER_COVERED, SEVERITY_SOFT, SEVERITY_LOUD,
+)
+from face_presence import (
+    FacePresenceFSM, FacePresenceConfig, count_valid_faces,
+    SingleFlight, OnceGuard,
 )
 
 # ===================== CONFIG =====================
@@ -127,6 +135,27 @@ if TELEGRAM_TOKEN_2 and CHAT_ID_2:
 OCCLUSION_THRESHOLD_SEC = int(os.environ.get("OCCLUSION_THRESHOLD_SEC", "10"))
 # Không thấy ai trong khung kéo dài bao lâu thì gửi thông báo "mất người".
 NO_PERSON_SEC           = int(os.environ.get("NO_PERSON_SEC", "15"))
+# CÓ NGƯỜI (YOLO xác nhận) nhưng MẤT MẶT kéo dài bao lâu thì báo "nghi vùi mặt".
+# Vá điểm mù của detector skin: mặt úp hẳn vào nệm/chăn → mất landmark → skin
+# detector không đánh giá được. Đặt thận trọng (mặc định 15s) vì bé quay đầu /
+# nằm nghiêng cũng làm mất mặt tạm thời → tránh báo nhầm. 0 = TẮT nhánh này.
+# Lưu ý: nhánh này chỉ hoạt động khi YOLO bật (cần xác nhận còn người trong khung).
+FACE_LOST_SEC           = int(os.environ.get("FACE_LOST_SEC", "15"))
+
+# ---- Giảm báo nhầm khi bé nằm nghiêng/quay đầu (3 lớp phòng vệ) ----
+# Lớp 1 — BlazeFace fallback: FaceMesh cần mặt khá chính diện nên mất mặt khi bé
+#   nghiêng; BlazeFace (mp.face_detection, full-range) bền với góc nghiêng hơn,
+#   chạy KHI FaceMesh mất mặt → nếu BlazeFace vẫn thấy mặt thì coi mặt CÒN nhìn
+#   thấy được (bé chỉ quay/nghiêng) → KHÔNG tính mất mặt. Chỉ khi CẢ HAI đều mất
+#   mặt mà YOLO vẫn thấy người → mới đếm FACE_LOST. Đây là lớp giảm FP mạnh nhất.
+FACE_DETECT_CONF        = float(os.environ.get("FACE_DETECT_CONF", "0.5"))
+# Lớp 3 — head-pose: |yaw proxy| (0=chính diện, →1 khi xoay hẳn) ngay trước khi
+#   mất mặt ≥ ngưỡng này → coi là 'đang quay nghiêng' (thiên về an toàn) → báo NHẸ;
+#   ngược lại (mất mặt khi còn gần chính diện) → nghi bị che đột ngột → báo TO ngay.
+FACE_LOST_PROFILE_YAW   = float(os.environ.get("FACE_LOST_PROFILE_YAW", "0.55"))
+# Lớp 2 — cảnh báo leo thang: với ca 'nằm nghiêng', nếu mất mặt kéo dài ≥ ngần này
+#   giây thì leo thang từ nhắc NHẸ lên cảnh báo TO (nằm nghiêng quá lâu cũng đáng ngại).
+FACE_LOST_ESCALATE_SEC  = int(os.environ.get("FACE_LOST_ESCALATE_SEC", "30"))
 # Giữ trạng thái "có người" thêm bao lâu sau khi MẤT tín hiệu (mặt + YOLO) →
 # chống MediaPipe rớt track chập chờn trên Pi 4 bị hiểu nhầm thành "mất người".
 PRESENCE_HOLD_SEC       = float(os.environ.get("PRESENCE_HOLD_SEC", "2.0"))
@@ -167,12 +196,35 @@ HEARTBEAT_SEC           = int(os.environ.get("HEARTBEAT_SEC", "0"))
 # ---- Thông báo khởi động / hiệu chỉnh ----
 # Lúc khởi động gửi Telegram yêu cầu đưa mặt trẻ vào khung để hiệu chỉnh; nhắc
 # lại mỗi CALIB_REMIND_SEC nếu mãi chưa thấy mặt; xác nhận khi hiệu chỉnh xong.
-STARTUP_NOTIFY          = os.environ.get("STARTUP_NOTIFY", "1").lower() in ("1", "true", "yes")
+# DEFAULT MỚI = "0" (TẮT): production không yêu cầu đưa mặt vào khung lúc khởi
+# động, KHÔNG gửi "đang quét tìm bé" / "vẫn chưa thấy bé". Calibration occlusion
+# vẫn diễn ra THỤ ĐỘNG (im lặng) khi có mặt phù hợp. Đặt STARTUP_NOTIFY=1 để bật
+# lại hành vi cũ (backward-compat). Việc báo "có khuôn mặt" giờ do face-presence
+# notify lo (text-only) — xem khối FACE-PRESENCE bên dưới.
+STARTUP_NOTIFY          = os.environ.get("STARTUP_NOTIFY", "0").lower() in ("1", "true", "yes")
 CALIB_REMIND_SEC        = int(os.environ.get("CALIB_REMIND_SEC", "60"))
 # Cổng chất lượng khi hiệu chỉnh: chỉ học baseline từ frame ĐẠT (đủ sáng + nét).
 # Điều kiện kém kéo dài ≥ ngần này giây → gửi Telegram hướng dẫn (grace để bỏ
 # qua mờ thoáng qua do autofocus). Ngưỡng tối dùng chung HEALTH_DARK_LUMA.
 CALIB_COND_GRACE_SEC    = float(os.environ.get("CALIB_COND_GRACE_SEC", "4"))
+
+# ---- FACE-PRESENCE notify (THÔNG BÁO PHÁT HIỆN KHUÔN MẶT — text-only) ----
+# Khi xuất hiện ≥1 khuôn mặt HỢP LỆ + ỔN ĐỊNH → gửi ĐÚNG MỘT tin Telegram TEXT
+# (không lưu ảnh, không gửi ảnh). Mặt đứng nguyên KHÔNG lặp; chỉ báo lần sau khi
+# TẤT CẢ mặt đã rời ổn định + cooldown hết. ĐÂY CHỈ LÀ FACE DETECTION — không
+# nhận dạng danh tính, không khẳng định là "bé". Chạy THỤ ĐỘNG, độc lập với
+# calibration occlusion. Tách hẳn FSM an toàn (state_machine.py).
+FACE_PRESENCE_NOTIFY         = os.environ.get("FACE_PRESENCE_NOTIFY", "1").lower() in ("1", "true", "yes")
+# Throttle: chỉ chạy face analysis mỗi N frame (KHÔNG chạy AI trên mọi frame).
+# Default 4 → ở 15fps ≈ 3-4 lần/giây (mục tiêu khởi điểm trên Pi 4; benchmark thật).
+FACE_SCAN_EVERY_N            = max(1, int(os.environ.get("FACE_SCAN_EVERY_N", "4")))
+FACE_PRESENCE_MIN_CONFIDENCE = float(os.environ.get("FACE_PRESENCE_MIN_CONFIDENCE", "0.6"))
+FACE_PRESENCE_MIN_AREA_RATIO = float(os.environ.get("FACE_PRESENCE_MIN_AREA_RATIO", "0.02"))
+FACE_PRESENCE_CONFIRM_FRAMES = int(os.environ.get("FACE_PRESENCE_CONFIRM_FRAMES", "4"))
+FACE_PRESENCE_CONFIRM_SEC    = float(os.environ.get("FACE_PRESENCE_CONFIRM_SEC", "1.0"))
+FACE_EXIT_CONFIRM_FRAMES     = int(os.environ.get("FACE_EXIT_CONFIRM_FRAMES", "5"))
+FACE_EXIT_CONFIRM_SEC        = float(os.environ.get("FACE_EXIT_CONFIRM_SEC", "2.0"))
+FACE_NOTIFY_COOLDOWN_SEC     = float(os.environ.get("FACE_NOTIFY_COOLDOWN_SEC", "30"))
 
 # YOLO settings (CPU-only). Default run_every=10 frame để giảm tải trên Pi 4
 # (4 nhân A72 yếu hơn → giãn YOLO; YOLO chỉ dùng khi mất mặt nên không hại độ nhạy).
@@ -304,21 +356,111 @@ class PersonDetector:
             return None
 
 
+class FaceDetector:
+    """BlazeFace (MediaPipe FaceDetection) — TẦNG PHÁT HIỆN MẶT PHỤ, bền với góc
+    nghiêng hơn FaceMesh. Vai trò: chỉ chạy KHI FaceMesh mất mặt, để phân biệt
+    'bé quay/nghiêng — mặt còn nhìn thấy được' (BlazeFace vẫn thấy) với 'mặt đã
+    thật sự khuất — úp nệm/trùm kín' (BlazeFace cũng mất). model_selection=1 =
+    full-range, tốt cho camera đặt xa/cao trên cũi. CPU-only, rẻ (~5-10ms)."""
+
+    def __init__(self, conf: float):
+        self.detector = None
+        try:
+            self._mp_fd = mp.solutions.face_detection
+            self.detector = self._mp_fd.FaceDetection(
+                model_selection=1, min_detection_confidence=conf,
+            )
+            print(f"✅ BlazeFace sẵn sàng (fallback phát hiện mặt góc nghiêng) "
+                  f"| conf={conf}")
+        except Exception as e:
+            print(f"⚠️  Không khởi tạo được BlazeFace ({e}); fallback tắt → "
+                  f"nhánh mất-mặt sẽ kém phân biệt 'nghiêng' vs 'vùi'.")
+            self.detector = None
+
+    def has_face(self, frame_rgb) -> "bool | None":
+        """True/False nếu BlazeFace có/không thấy mặt; None nếu tắt/lỗi.
+        Nhận ảnh RGB (tái dùng rgb đã convert cho FaceMesh, khỏi convert lại)."""
+        if self.detector is None:
+            return None
+        try:
+            res = self.detector.process(frame_rgb)
+            return bool(res.detections)
+        except Exception as e:
+            print(f"❌ Lỗi BlazeFace: {e}")
+            return None
+
+    def detect(self, frame_rgb):
+        """Trả list[(bbox_norm, score)] cho TẤT CẢ mặt phát hiện (đa mặt) — phục
+        vụ face-presence FSM. bbox_norm=(xmin,ymin,w,h) chuẩn hóa 0..1.
+        Trả [] nếu không thấy mặt; None nếu detector tắt/lỗi (caller FREEZE FSM).
+        KHÔNG nhận dạng danh tính — chỉ vị trí + confidence."""
+        if self.detector is None:
+            return None
+        try:
+            res = self.detector.process(frame_rgb)
+        except Exception as e:
+            print(f"❌ Lỗi BlazeFace detect: {e}")
+            return None
+        out = []
+        if res.detections:
+            for d in res.detections:
+                rb = d.location_data.relative_bounding_box
+                score = float(d.score[0]) if d.score else 0.0
+                out.append(((rb.xmin, rb.ymin, rb.width, rb.height), score))
+        return out
+
+    def close(self):
+        """Đóng MediaPipe FaceDetection (idempotent — gọi nhiều lần an toàn)."""
+        if self.detector is not None:
+            try:
+                self.detector.close()
+            except Exception:
+                pass
+            self.detector = None
+
+
 class BabyMonitorV5:
     def __init__(self):
         self.detector        = OcclusionDetector()
         self.smoother        = SmoothingBuffer()
         self.person_detector = PersonDetector(YOLO_MODEL_PATH)
+        self.face_detector   = FaceDetector(FACE_DETECT_CONF)
+        # --- FACE-PRESENCE (text-only, độc lập pipeline an toàn) ---
+        # Detector BlazeFace RIÊNG, chạy thụ động + throttled để đếm mặt hợp lệ
+        # (đa mặt). Tách khỏi self.face_detector (nhánh FACE_LOST) để KHÔNG đổi
+        # cadence pipeline an toàn.
+        self.presence_cfg = FacePresenceConfig(
+            min_confidence = FACE_PRESENCE_MIN_CONFIDENCE,
+            min_area_ratio = FACE_PRESENCE_MIN_AREA_RATIO,
+            confirm_frames = FACE_PRESENCE_CONFIRM_FRAMES,
+            confirm_sec    = FACE_PRESENCE_CONFIRM_SEC,
+            exit_frames    = FACE_EXIT_CONFIRM_FRAMES,
+            exit_sec       = FACE_EXIT_CONFIRM_SEC,
+            cooldown_sec   = FACE_NOTIFY_COOLDOWN_SEC,
+        )
+        self.presence_fsm = FacePresenceFSM(self.presence_cfg)
+        self.presence_detector = (
+            FaceDetector(FACE_PRESENCE_MIN_CONFIDENCE)
+            if FACE_PRESENCE_NOTIFY else None
+        )
+        self._presence_single = SingleFlight()   # 1 phiên face analysis tại 1 thời điểm
+        self._face_scan_count = 0
         self.scene           = SceneMonitor(
             blur_drop_frac = BLUR_DROP_FRAC,
         )
         self.fsm             = OcclusionStateMachine(
             threshold_sec = OCCLUSION_THRESHOLD_SEC,
             no_person_sec = NO_PERSON_SEC,
+            face_lost_sec = FACE_LOST_SEC,
         )
         # Giữ "có người" thêm PRESENCE_HOLD_SEC sau lần thấy mặt/người gần nhất
         # → MediaPipe rớt track vài frame KHÔNG bị hiểu nhầm thành "mất người".
         self._last_present_t = None
+        # --- Lớp 3 (head-pose): lịch sử |yaw| gần đây khi CÒN thấy mặt, để khi
+        # mất mặt biết bé 'đang quay nghiêng' (an toàn) hay 'mất khi còn chính
+        # diện' (nghi che). Phân loại 1 lần/sự kiện FACE_LOST, lưu ở _facelost_manner.
+        self._yaw_history: list[tuple[float, float]] = []   # (timestamp, |yaw|)
+        self._facelost_manner: str | None = None
         self.last_alert_time = 0.0
         self._prev_in_alert  = False
         # --- Policy timing thuần (test ở tests/test_alert_policy.py) ---
@@ -347,6 +489,8 @@ class BabyMonitorV5:
         self._last_heartbeat_t  = 0.0
 
         self._shutdown = threading.Event()
+        # Dispose ĐÚNG MỘT lần dù shutdown đến từ nhiều đường (finally + signal).
+        self._dispose_guard = OnceGuard()
         try:
             signal.signal(signal.SIGTERM, lambda *_: self._shutdown.set())
             signal.signal(signal.SIGINT,  lambda *_: self._shutdown.set())
@@ -361,7 +505,10 @@ class BabyMonitorV5:
     def _save_event(self, frame, status, result, trigger):
         ts_file = datetime.now().strftime("%Y%m%d_%H%M%S")
         ts_iso  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        event_type = "no_person" if trigger == TRIGGER_NO_PERSON else "face_covered"
+        event_type = {
+            TRIGGER_NO_PERSON: "no_person",
+            TRIGGER_FACE_LOST: "face_lost",
+        }.get(trigger, "face_covered")
         try:
             jpg_path  = EVENTS_DIR / f"{event_type}_{ts_file}.jpg"
             json_path = EVENTS_DIR / f"{event_type}_{ts_file}.json"
@@ -393,7 +540,7 @@ class BabyMonitorV5:
             print(f"❌ Lỗi lưu event: {e}")
 
     # ---------- Telegram alert ----------
-    async def send_alert(self, frame, elapsed, result, trigger):
+    async def send_alert(self, frame, elapsed, result, trigger, severity=None):
         now = time.monotonic()
         if now - self.last_alert_time < COOLDOWN_SEC:
             return
@@ -411,6 +558,24 @@ class BabyMonitorV5:
                 f"👉 Kiểm tra xem bé còn trong khung camera không "
                 f"(hoặc camera bị lệch/che)."
             )
+        elif trigger == TRIGGER_FACE_LOST:
+            if severity == SEVERITY_SOFT:
+                # Ca 'nằm nghiêng' (head-pose nghiêng lúc mất mặt) → nhắc NHẸ,
+                # tránh làm cha mẹ hoảng vì tình huống nhiều khả năng bình thường.
+                caption = (
+                    f"⚠️ *Không thấy rõ mặt bé ~{elapsed:.0f}s*\n\n"
+                    f"⏰ Thời gian: `{ts}`\n"
+                    f"Bé có thể đang nằm nghiêng / quay đầu (vẫn thấy người trong khung).\n\n"
+                    f"👉 Kiểm tra giúp cho yên tâm nhé. (Nếu kéo dài, em sẽ báo khẩn.)"
+                )
+            else:
+                caption = (
+                    f"🚨 *KHÔNG THẤY MẶT BÉ — NGHI BỊ VÙI/CHE KÍN!*\n\n"
+                    f"⏰ Thời gian: `{ts}`\n"
+                    f"⏱ Mất mặt: `{elapsed:.1f} giây` (vẫn thấy người trong khung)\n\n"
+                    f"👉 *Kiểm tra bé ngay!* Mặt bé có thể đang úp vào nệm/chăn hoặc "
+                    f"bị vật che kín."
+                )
         else:
             if result is not None:
                 detail = (
@@ -524,18 +689,84 @@ class BabyMonitorV5:
             threading.Thread(target=_run_one, args=(token, chat_id),
                              daemon=True).start()
 
-    def _dispatch_alert(self, frame, elapsed, result, trigger, save_image=True):
-        status = ("NO_PERSON" if trigger == TRIGGER_NO_PERSON
-                  else "FACE_COVERED")
+    def _dispatch_alert(self, frame, elapsed, result, trigger, save_image=True,
+                        severity=None):
+        status = {
+            TRIGGER_NO_PERSON: "NO_PERSON",
+            TRIGGER_FACE_LOST: "FACE_LOST",
+        }.get(trigger, "FACE_COVERED")
         snap = frame.copy()
         # Chỉ lưu ảnh+json cho alert đầu của event; re-alert chỉ gửi Telegram.
         if save_image:
             self._save_event(snap, status, result, trigger)
         threading.Thread(
             target=lambda: asyncio.run(
-                self.send_alert(snap, elapsed, result, trigger)
+                self.send_alert(snap, elapsed, result, trigger, severity)
             ), daemon=True
         ).start()
+
+    # ---------- FACE-PRESENCE (text-only, không lưu/không gửi ảnh) ----------
+    def _scan_face_presence(self, now, rgb):
+        """Chạy face analysis THỤ ĐỘNG + throttled, step FSM face-presence và
+        gửi event (nếu có). KHÔNG lưu ảnh, KHÔNG gửi ảnh, KHÔNG chặn main loop.
+
+        - Throttle theo FACE_SCAN_EVERY_N (không chạy AI mọi frame).
+        - SingleFlight: chỉ 1 phiên tại một thời điểm (loop đồng bộ nên hiển nhiên,
+          guard này phòng tái nhập).
+        - detector lỗi/None → ready=False (FREEZE) → không tính là 'không mặt'."""
+        if self.presence_detector is None:
+            return
+        self._face_scan_count += 1
+        if self._face_scan_count % FACE_SCAN_EVERY_N != 0:
+            return
+        if not self._presence_single.acquire():
+            return
+        try:
+            dets = self.presence_detector.detect(rgb)
+            if dets is None:
+                # Detector lỗi → FREEZE (không re-arm/exit giả).
+                self.presence_fsm.step(now, 0, ready=False)
+                return
+            vcount = count_valid_faces(dets, self.presence_cfg)
+            ev = self.presence_fsm.step(now, vcount, ready=True)
+        finally:
+            self._presence_single.release()
+        if ev is not None:
+            self._dispatch_face_presence(ev, vcount)
+
+    def _dispatch_face_presence(self, ev, vcount):
+        """Phát ĐÚNG một event face-presence: Telegram TEXT, không ảnh, không lưu.
+        Nội dung KHÔNG khẳng định là 'bé' (chỉ face detection, không định danh)."""
+        print(f"👤 [FACE-PRESENCE] event {ev.id} (mặt hợp lệ={vcount}) "
+              f"→ Telegram text (không ảnh)")
+        self._notify_text("👤 Phát hiện khuôn mặt ổn định trong vùng quan sát.")
+
+    # ---------- Lớp 3: head-pose để phân loại 'cách mất mặt' ----------
+    # FaceMesh landmark dùng để ước lượng yaw: mũi 1, mép trái 234, mép phải 454.
+    _YAW_NOSE, _YAW_LEFT, _YAW_RIGHT = 1, 234, 454
+
+    def _update_yaw(self, now, landmarks):
+        """Ghi |yaw| của frame đang THẤY mặt vào lịch sử (giữ ~3s gần nhất)."""
+        try:
+            yaw = estimate_yaw_proxy(
+                landmarks[self._YAW_NOSE].x,
+                landmarks[self._YAW_LEFT].x,
+                landmarks[self._YAW_RIGHT].x,
+            )
+        except (IndexError, AttributeError):
+            return
+        self._yaw_history.append((now, abs(yaw)))
+        cutoff = now - 3.0
+        while self._yaw_history and self._yaw_history[0][0] < cutoff:
+            self._yaw_history.pop(0)
+
+    def _recent_abs_yaw(self, now, max_age=2.0):
+        """|yaw| được ghi gần nhất nếu còn trong max_age giây, ngược lại None."""
+        if self._yaw_history:
+            ts, ay = self._yaw_history[-1]
+            if now - ts <= max_age:
+                return ay
+        return None
 
     # ---------- Watchdog (tự giám sát, không fail âm thầm) ----------
     def _update_fps(self, now):
@@ -574,8 +805,8 @@ class BabyMonitorV5:
         """Nhắc đưa mặt vào khung khi mãi chưa hiệu chỉnh được (theo CalibrationReminder)."""
         if self.calib_reminder.step(now, calib_done, face_present):
             self._notify_text(
-                "⚠️ *Chưa hiệu chỉnh được* — vẫn chưa thấy mặt trẻ trong khung.\n"
-                "👉 Kiểm tra hướng camera / đưa mặt trẻ vào khung camera."
+                "⚠️ *Vẫn chưa thấy bé trong khung* — đang tiếp tục quét.\n"
+                "👉 Kiểm tra hướng camera để mặt bé nằm trong khung hình."
             )
 
     def _maybe_warn_calib_conditions(self, now, too_dark, too_blurry):
@@ -606,8 +837,8 @@ class BabyMonitorV5:
             return
         self._calib_done_notified = True
         q = self.detector.calibration_quality
-        msg = (f"✅ *Đã hiệu chỉnh xong — BẮT ĐẦU GIÁM SÁT.*\n"
-               f"   Chất lượng: `{q:.2f}`")
+        msg = (f"✅ *Đã thấy bé — BẮT ĐẦU GIÁM SÁT.*\n"
+               f"   Chất lượng hiệu chỉnh: `{q:.2f}`")
         if q < MIN_QUALITY_WARN:
             msg += ("\n⚠️ Chất lượng hơi thấp — nên tăng sáng / chỉnh lại vị trí "
                     "camera; hệ thống sẽ tự hiệu chỉnh lại khi ổn định.")
@@ -669,6 +900,20 @@ class BabyMonitorV5:
                              f"miệng {check_result.mouth_votes_for_occluded}/2")
             line = (f"{prefix} [{ts}] 🔴 ĐANG BỊ CHE MŨI/MIỆNG — "
                     f"đã {elapsed:.1f}s{votes_txt}, {_countdown(OCCLUSION_THRESHOLD_SEC)}")
+
+        elif state == STATE_FACE_LOST:
+            yolo_note = ""
+            if person_seen is True:
+                yolo_note = " | YOLO: vẫn thấy người"
+            elif person_seen is False:
+                yolo_note = " | YOLO: không thấy ai"
+            manner_note = ""
+            if self._facelost_manner == MANNER_TURNED:
+                manner_note = " | nghi NẰM NGHIÊNG (báo nhẹ)"
+            elif self._facelost_manner == MANNER_COVERED:
+                manner_note = " | nghi BỊ CHE (báo khẩn)"
+            line = (f"{prefix} [{ts}] 🟠 CÓ NGƯỜI NHƯNG MẤT MẶT — "
+                    f"đã {elapsed:.1f}s{yolo_note}{manner_note}, {_countdown(FACE_LOST_SEC)}")
         else:
             line = f"{prefix} [{ts}] (state lạ: {state})"
 
@@ -688,10 +933,83 @@ class BabyMonitorV5:
         self.calib_cond_warner.reset()  # quên cảnh báo điều kiện hiệu chỉnh
         self.fsm._reset_covered()
         self.fsm._reset_absent()
+        self.fsm._reset_facelost()
         self._last_present_t = None
         self._safe_streak_start = None
+        self._yaw_history.clear()
+        self._facelost_manner = None
         self._recal_request.clear()
         print("🔄 Đã reset — sẽ calibrate lại khi thấy mặt.\n")
+
+    # ---------- Camera lifecycle (Linux/V4L2 resilient) ----------
+    def _configure_camera(self, cap):
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAMERA_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS,          CAMERA_FPS)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+        cap.set(cv2.CAP_PROP_AUTOFOCUS,    1 if CAMERA_AUTOFOCUS else 0)
+
+    def _open_camera(self, reconnect=False):
+        """Mở camera với BACKOFF CÓ GIỚI HẠN (≤30s), không block vô hạn, không
+        spam log. Xử lý đúng các ca Linux/V4L2:
+          - /dev/video* không tồn tại / sai node → open() fail.
+          - User chưa thuộc group 'video' / permission denied → open() fail.
+          - Camera bị process khác giữ (busy) → open() fail hoặc read() fail.
+          - open() OK nhưng KHÔNG đọc được frame → verify rồi thử lại.
+          - Camera enumerate chậm sau boot / unplug-replug → cứ retry tới khi lên.
+        KHÔNG tự chạy fuser -k, KHÔNG giết process khác.
+        Trả VideoCapture đã verify đọc được frame, hoặc None nếu đang shutdown."""
+        src = int(CAMERA_SOURCE) if CAMERA_SOURCE.isdigit() else CAMERA_SOURCE
+        backoff = 1.0
+        warned = False
+        while not self._shutdown.is_set():
+            cap = cv2.VideoCapture(src)
+            if cap.isOpened():
+                self._configure_camera(cap)
+                # open() thành công ≠ đọc được frame → verify vài lần.
+                ok = False
+                for _ in range(5):
+                    if self._shutdown.is_set():
+                        break
+                    ret, _f = cap.read()
+                    if ret and _f is not None:
+                        ok = True
+                        break
+                    time.sleep(0.1)
+                if ok:
+                    if warned or reconnect:
+                        print(f"✅ Camera đã kết nối: {src}")
+                    return cap
+                cap.release()   # mở được nhưng câm → bỏ, thử lại
+            if not warned:
+                # In ĐÚNG MỘT lần cho mỗi đợt mất camera (chống spam log).
+                print(f"⏳ Chưa dùng được camera '{src}' — kiểm tra: thiết bị đã "
+                      f"cắm? user thuộc group 'video'? node /dev/video* đúng? "
+                      f"camera có đang bị app khác giữ? Đang tự thử lại (backoff)...")
+                warned = True
+            self._shutdown.wait(backoff)            # respect shutdown, không busy-loop
+            backoff = min(backoff * 2.0, 30.0)      # giới hạn 30s
+        return None
+
+    def _dispose(self, cap):
+        """Giải phóng camera + đóng model — ĐÚNG MỘT lần (idempotent)."""
+        def _do():
+            try:
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+            for det in (self.face_detector, self.presence_detector):
+                if det is not None:
+                    det.close()
+            if not HEADLESS:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+            print("🔴 Đã dừng")
+        self._dispose_guard.run(_do)
 
     # ---------- UI ----------
     def draw_ui(self, frame, landmarks, state, elapsed, face_present,
@@ -740,7 +1058,7 @@ class BabyMonitorV5:
             cv2.putText(frame, line, (10, 50 + i * 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 200, 255), 1)
 
-        is_alert_state = state in (STATE_COVERED, STATE_NO_PERSON)
+        is_alert_state = state in (STATE_COVERED, STATE_FACE_LOST, STATE_NO_PERSON)
         if is_alert_state:
             cv2.rectangle(frame, (0,0), (w-1,h-1), (0,0,220), 6)
 
@@ -771,6 +1089,14 @@ class BabyMonitorV5:
             color = (0, 80, 255)
             cv2.putText(frame, ">>> CANH BAO CHE MUI/MIENG <<<",
                         (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0,60,255), 2)
+        elif state == STATE_FACE_LOST:
+            manner_tag = ("NAM NGHIENG?" if self._facelost_manner == MANNER_TURNED
+                          else "NGHI CHE!" if self._facelost_manner == MANNER_COVERED
+                          else "")
+            msg = f"MAT MAT {manner_tag} {elapsed:.1f}s | {_tail(FACE_LOST_SEC)}"
+            color = (0, 80, 255)
+            cv2.putText(frame, ">>> KHONG THAY MAT BE - KIEM TRA <<<",
+                        (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0,60,255), 2)
         else:
             quality_warn = ""
             if self.detector.is_ready and self.detector.calibration_quality < MIN_QUALITY_WARN:
@@ -788,6 +1114,7 @@ class BabyMonitorV5:
             STATE_CALIBRATING: (0,200,255),
             STATE_SAFE:        (0,255,0),
             STATE_COVERED:     (0,0,255),
+            STATE_FACE_LOST:   (0,80,255),
             STATE_NO_PERSON:   (0,140,255),
         }.get(state, (128,128,128))
         cv2.circle(frame, (w-20, 20), 10, dot_color, -1)
@@ -800,26 +1127,28 @@ class BabyMonitorV5:
         self._warmup_telegram()
 
         src = int(CAMERA_SOURCE) if CAMERA_SOURCE.isdigit() else CAMERA_SOURCE
-        cap = cv2.VideoCapture(src)
-        if not cap.isOpened():
-            print(f"❌ Không mở được camera: {src}")
+        # Mở camera với backoff có giới hạn (không crash khi thiếu /dev/video,
+        # permission denied, busy, hay camera lên chậm sau boot).
+        cap = self._open_camera()
+        if cap is None:
+            print("🔴 Thoát trước khi mở được camera (nhận tín hiệu dừng).")
+            self._dispose(None)
             return
-
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAMERA_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-        cap.set(cv2.CAP_PROP_FPS,          CAMERA_FPS)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-        # Autofocus ON mặc định — giữ mặt nét để MediaPipe track ổn định.
-        cap.set(cv2.CAP_PROP_AUTOFOCUS,    1 if CAMERA_AUTOFOCUS else 0)
 
         actual_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
 
         print("🟢 Baby Monitor V5")
-        print(f"   Phát hiện        : CHE mũi/miệng (skin+histogram) "
-              f"[mất người chỉ hiển thị, KHÔNG cảnh báo]")
+        print(f"   Phát hiện        : CHE mũi/miệng (skin+histogram) + MẤT MẶT "
+              f"(có người mà mất mặt) [mất người chỉ hiển thị, KHÔNG cảnh báo]")
+        print(f"   Báo mất mặt      : "
+              + (f"sau {FACE_LOST_SEC}s (cần YOLO xác nhận còn người)"
+                 if FACE_LOST_SEC > 0 else "TẮT (FACE_LOST_SEC=0)"))
+        if FACE_LOST_SEC > 0:
+            print(f"   Chống báo nhầm   : Lớp1 BlazeFace (mặt nghiêng vẫn thấy → "
+                  f"không báo) | Lớp3 head-pose (yaw≥{FACE_LOST_PROFILE_YAW} = nằm "
+                  f"nghiêng→nhẹ) | Lớp2 leo thang sau {FACE_LOST_ESCALATE_SEC}s")
         print(f"   Camera           : {src} → {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
         print(f"   Autofocus        : {'BẬT' if CAMERA_AUTOFOCUS else 'TẮT'} "
               f"(CAMERA_AUTOFOCUS để đổi)")
@@ -838,8 +1167,18 @@ class BabyMonitorV5:
         print(f"   Heartbeat TG     : "
               + (f"mỗi {HEARTBEAT_SEC}s" if HEARTBEAT_SEC > 0 else "TẮT (đặt HEARTBEAT_SEC để bật)"))
         print(f"   Startup notify   : "
-              + (f"BẬT (yêu cầu đưa mặt vào khung; nhắc lại mỗi {CALIB_REMIND_SEC}s)"
-                 if STARTUP_NOTIFY else "TẮT"))
+              + (f"BẬT (tự quét tìm bé; báo khi thấy bé + bắt đầu giám sát; "
+                 f"nhắc lại mỗi {CALIB_REMIND_SEC}s nếu mãi chưa thấy bé)"
+                 if STARTUP_NOTIFY else "TẮT (không gửi tin khi không có mặt)"))
+        print(f"   Face-presence    : "
+              + (f"BẬT (text-only; báo 1 lần khi có ≥1 mặt ổn định; scan mỗi "
+                 f"{FACE_SCAN_EVERY_N} frame; confirm {FACE_PRESENCE_CONFIRM_FRAMES}f/"
+                 f"{FACE_PRESENCE_CONFIRM_SEC:.0f}s; exit {FACE_EXIT_CONFIRM_FRAMES}f/"
+                 f"{FACE_EXIT_CONFIRM_SEC:.0f}s; cooldown {FACE_NOTIFY_COOLDOWN_SEC:.0f}s; "
+                 f"KHÔNG lưu/gửi ảnh; KHÔNG nhận dạng danh tính)"
+                 if (FACE_PRESENCE_NOTIFY and self.presence_detector
+                     and self.presence_detector.detector is not None)
+                 else "TẮT"))
         print("\n⏳ Đang load MediaPipe (lần đầu có thể mất 5-10s)...")
 
         calib_start = None
@@ -856,7 +1195,9 @@ class BabyMonitorV5:
             ) as face_mesh:
                 print("✅ MediaPipe sẵn sàng. Đang chờ mặt trẻ để calibrate...\n")
 
-                # Thông báo khởi động về Telegram (yêu cầu đưa mặt vào khung).
+                # Thông báo khởi động về Telegram. KHÔNG còn yêu cầu người dùng
+                # chủ động "đưa mặt vào khung": hệ thống TỰ quét, khi nào thấy bé
+                # thì tự hiệu chỉnh (~5s) rồi báo "đã thấy bé, bắt đầu giám sát".
                 if STARTUP_NOTIFY:
                     if calib_done:
                         self._calib_done_notified = True
@@ -864,11 +1205,11 @@ class BabyMonitorV5:
                     else:
                         self._notify_text(
                             "🟢 *Baby Monitor đã khởi động.*\n"
-                            "👉 Vui lòng đưa mặt trẻ vào khung camera để hệ thống "
-                            "hiệu chỉnh (~5 giây). Em sẽ báo lại khi bắt đầu giám sát."
+                            "🔍 Đang quét tìm bé trong khung camera... Em sẽ tự "
+                            "hiệu chỉnh và báo lại ngay khi thấy bé và bắt đầu giám sát."
                         )
 
-                while not self._shutdown.is_set() and cap.isOpened():
+                while not self._shutdown.is_set():
                     # === Recalibrate trigger ===
                     if self._recal_request.is_set():
                         self._do_recalibrate()
@@ -877,11 +1218,23 @@ class BabyMonitorV5:
 
                     ret, frame = cap.read()
                     if not ret:
+                        # CAMERA FAULT — TÁCH KHỎI trạng thái NO_FACE: KHÔNG step
+                        # face-presence FSM (freeze) → unplug/đơ không tạo event
+                        # giả & không re-arm. Không spam log mỗi frame.
                         fail_count += 1
                         if fail_count >= MAX_FAILS:
-                            print(f"❌ Mất camera {fail_count} frame → thoát")
-                            break
-                        time.sleep(0.05)
+                            print(f"⚠️ Mất frame {fail_count} lần liên tiếp — "
+                                  f"thử KẾT NỐI LẠI camera (không thoát).")
+                            try:
+                                cap.release()
+                            except Exception:
+                                pass
+                            cap = self._open_camera(reconnect=True)
+                            if cap is None:   # chỉ None khi đang shutdown
+                                break
+                            fail_count = 0
+                            continue
+                        self._shutdown.wait(0.05)
                         continue
                     fail_count = 0
 
@@ -895,6 +1248,12 @@ class BabyMonitorV5:
                     self._update_health(now, fps)
 
                     rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                    # === FACE-PRESENCE (thụ động, throttled, text-only) ===
+                    # Độc lập calibration occlusion. Tái dùng rgb đã convert ở trên;
+                    # nội bộ tự throttle theo FACE_SCAN_EVERY_N nên rẻ CPU.
+                    self._scan_face_presence(now, rgb)
+
                     res   = face_mesh.process(rgb)
                     face_present = bool(res.multi_face_landmarks)
 
@@ -903,13 +1262,26 @@ class BabyMonitorV5:
                     elapsed         = 0.0
                     trigger         = ""
                     person_seen     = None
+                    face_detectable = None
                     check_result: CheckResult | None = None
 
-                    # YOLO chỉ chạy khi đã hiệu chỉnh + KHÔNG thấy mặt → xác định
-                    # còn người trong khung không (phân biệt 'bé quay đầu/úp mặt'
-                    # với 'không còn ai').
+                    # Lớp 3: còn thấy mặt → ghi |yaw| để sau này biết bé mất mặt do
+                    # 'đang quay nghiêng' (an toàn) hay 'mất khi còn chính diện' (nghi che).
+                    if face_present:
+                        self._update_yaw(now, res.multi_face_landmarks[0].landmark)
+
+                    # Khi đã hiệu chỉnh + FaceMesh KHÔNG thấy mặt → chạy 2 fallback:
+                    #   - YOLO: còn người trong khung không (phân biệt 'bé còn đó' vs 'rời khung').
+                    #   - BlazeFace (Lớp 1): mặt có còn NHÌN THẤY ĐƯỢC không dù FaceMesh
+                    #     mất landmark (bé chỉ quay/nghiêng) → nếu còn thì KHÔNG tính mất mặt.
                     if calib_done and not face_present:
-                        person_seen = self.person_detector.has_person(frame)
+                        person_seen     = self.person_detector.has_person(frame)
+                        face_detectable = self.face_detector.has_face(rgb)
+
+                    # 'Mặt còn nhìn thấy được' = FaceMesh thấy HOẶC BlazeFace thấy.
+                    # Đây là tín hiệu đưa vào state machine cho nhánh mất-mặt (chỉ
+                    # coi là MẤT MẶT khi CẢ HAI tầng đều không thấy).
+                    face_visible = face_present or (face_detectable is True)
 
                     if face_present and not calib_done:
                         # === Calibration ===
@@ -956,10 +1328,10 @@ class BabyMonitorV5:
 
                     else:
                         # === Monitoring ===
-                        # 1) CÓ NGƯỜI? mặt (MediaPipe) HOẶC YOLO thấy người;
-                        #    giữ thêm PRESENCE_HOLD_SEC sau lần thấy gần nhất để
-                        #    MediaPipe rớt track vài frame không hóa "mất người".
-                        raw_present = face_present or (person_seen is True)
+                        # 1) CÓ NGƯỜI? mặt còn nhìn thấy (FaceMesh/BlazeFace) HOẶC
+                        #    YOLO thấy người; giữ thêm PRESENCE_HOLD_SEC sau lần
+                        #    thấy gần nhất để rớt track vài frame không hóa "mất người".
+                        raw_present = face_visible or (person_seen is True)
                         if raw_present:
                             self._last_present_t = now
                         person_present = (
@@ -982,14 +1354,29 @@ class BabyMonitorV5:
                         # Không thấy mặt → giữ nguyên smoother (không reset),
                         # nhưng không tạo cảnh báo che mới (không thấy mũi/miệng).
 
+                        # Nhánh mất-mặt dùng 'face_visible' (FaceMesh HOẶC BlazeFace)
+                        # → bé quay/nghiêng mà BlazeFace còn thấy mặt sẽ KHÔNG bị
+                        # tính mất mặt. covered vẫn dùng FaceMesh (cần landmark).
                         result_fsm = self.fsm.step(
                             now=now,
                             person_present=person_present,
                             covered=occluded_by_detector,
+                            face_present=face_visible,
                         )
                         state   = result_fsm.state
                         elapsed = result_fsm.elapsed
                         trigger = result_fsm.trigger
+
+                        # Lớp 3: phân loại 'cách mất mặt' MỘT LẦN khi sự kiện bắt đầu
+                        # (dựa |yaw| ngay trước lúc mất mặt). Quyết định mức cảnh báo.
+                        if state == STATE_FACE_LOST:
+                            if self._facelost_manner is None:
+                                self._facelost_manner = classify_face_loss(
+                                    self._recent_abs_yaw(now),
+                                    FACE_LOST_PROFILE_YAW,
+                                )
+                        else:
+                            self._facelost_manner = None
 
                         if result_fsm.should_alert:
                             # Thông báo đầu của sự kiện → lưu ảnh. Re-alert cùng
@@ -1003,13 +1390,28 @@ class BabyMonitorV5:
                                     self.fsm.occlusion_start
                                 )
                             kind = "THÔNG BÁO ĐẦU" if is_first_alert else "NHẮC LẠI"
-                            label = ("CHE MŨI/MIỆNG" if trigger == TRIGGER_COVERED
-                                     else "MẤT NGƯỜI")
+                            # Lớp 2: ca mất-mặt → mức độ nhẹ/to theo manner + thời gian.
+                            severity = None
+                            if trigger == TRIGGER_FACE_LOST:
+                                severity = face_lost_severity(
+                                    self._facelost_manner or MANNER_COVERED,
+                                    elapsed, FACE_LOST_ESCALATE_SEC,
+                                )
+                            label = {
+                                TRIGGER_COVERED:   "CHE MŨI/MIỆNG",
+                                TRIGGER_FACE_LOST: "MẤT MẶT (NGHI VÙI/CHE KÍN)",
+                                TRIGGER_NO_PERSON: "MẤT NGƯỜI",
+                            }.get(trigger, trigger)
+                            sev_txt = f" sev={severity}" if severity else ""
+                            manner_txt = (f" manner={self._facelost_manner}"
+                                          if trigger == TRIGGER_FACE_LOST else "")
                             print(f"🚨 [{label}] ({kind}) — elapsed={elapsed:.1f}s"
+                                  f"{sev_txt}{manner_txt}"
                                   + ("" if is_first_alert else " (không lưu ảnh trùng)"))
                             self._dispatch_alert(frame, elapsed,
                                                  check_result, trigger,
-                                                 save_image=is_first_alert)
+                                                 save_image=is_first_alert,
+                                                 severity=severity)
 
                         # === Auto-recalibrate sau N giây safe liên tục ===
                         if AUTO_RECAL_AFTER_SEC > 0 and state == STATE_SAFE:
@@ -1065,13 +1467,10 @@ class BabyMonitorV5:
             print(f"💥 Lỗi không xử lý được: {type(e).__name__}: {e}")
             raise
         finally:
-            cap.release()
-            if not HEADLESS:
-                try:
-                    cv2.destroyAllWindows()
-                except Exception:
-                    pass
-            print("🔴 Đã dừng")
+            # Giải phóng camera + đóng model ĐÚNG MỘT lần (idempotent). FaceMesh
+            # tự đóng nhờ `with`. Telegram/heartbeat là daemon thread → không tạo
+            # thread mới sau shutdown (mọi vòng lặp đã thoát).
+            self._dispose(cap)
 
 
 if __name__ == "__main__":

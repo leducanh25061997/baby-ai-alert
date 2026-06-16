@@ -1,6 +1,12 @@
-"""State machine ĐƠN GIẢN — chỉ 1 sự kiện cần BÁO:
+"""State machine ĐƠN GIẢN — 2 sự kiện cần BÁO:
 
-  1. CHE mũi/miệng     : có người + vùng mũi/miệng bị che ≥ threshold → báo.
+  1. CHE mũi/miệng  : có người + vùng mũi/miệng bị che ≥ threshold → báo.
+                      (skin/histogram detector, chỉ đánh giá được khi THẤY mặt)
+  2. MẤT MẶT        : có người (YOLO xác nhận) nhưng KHÔNG còn thấy mặt
+                      ≥ face_lost_sec → nghi mặt bị vùi/che kín → báo.
+                      Vá đúng ca nguy hiểm nhất mà detector skin bỏ sót: mặt
+                      úp hẳn vào nệm/chăn → mất landmark → skin detector không
+                      đánh giá được. face_lost_sec=0 → tắt nhánh này.
 
 Trạng thái MẤT NGƯỜI (không thấy ai trong khung) vẫn được theo dõi để
 log/UI hiển thị, NHƯNG không còn gửi cảnh báo (should_alert luôn False).
@@ -20,10 +26,12 @@ from typing import Optional
 # Trạng thái cấp UI
 STATE_SAFE      = "SAFE"          # có người, mũi/miệng nhìn rõ
 STATE_COVERED   = "COVERED"       # có người, mũi/miệng bị che (đang đếm/đã báo)
+STATE_FACE_LOST = "FACE_LOST"     # có người nhưng mất mặt (nghi vùi/che kín)
 STATE_NO_PERSON = "NO_PERSON"     # không thấy ai trong khung
 
 # Lý do trigger
 TRIGGER_COVERED   = "covered"
+TRIGGER_FACE_LOST = "face_lost"
 TRIGGER_NO_PERSON = "no_person"
 
 
@@ -36,23 +44,27 @@ class StepResult:
 
 
 class OcclusionStateMachine:
-    """Quản lý timing cho 2 cảnh báo độc lập.
+    """Quản lý timing cho các cảnh báo độc lập (che mũi/miệng + mất mặt).
 
     Đầu vào mỗi frame:
       - now            : timestamp (float seconds)
-      - person_present : có thấy người/mặt trong khung không (đã smooth ở caller)
+      - person_present : có thấy người trong khung không (mặt HOẶC YOLO; đã smooth)
       - covered        : vùng mũi/miệng có bị che không (đã smooth ở caller)
+      - face_present   : frame này MediaPipe có thấy mặt không (raw, để phát hiện
+                         'có người nhưng mất mặt'). Mặc định True (tương thích cũ).
     """
 
     def __init__(
         self,
         threshold_sec: float = 15.0,        # che bao lâu thì báo
         no_person_sec: float = 15.0,        # mất người bao lâu thì báo
+        face_lost_sec: float = 15.0,        # có người mà mất mặt bao lâu thì báo (0=tắt)
         repeat_sec: Optional[float] = None, # lặp lại mỗi bao lâu (mặc định = threshold)
-        safe_recovery_sec: float = 1.5,     # anti-flicker khi mũi/miệng hết che
+        safe_recovery_sec: float = 1.5,     # anti-flicker khi hết che / mặt hiện lại
     ):
         self.threshold_sec     = threshold_sec
         self.no_person_sec     = no_person_sec
+        self.face_lost_sec     = face_lost_sec
         self.repeat_sec        = repeat_sec if repeat_sec is not None else threshold_sec
         self.safe_recovery_sec = safe_recovery_sec
 
@@ -60,6 +72,10 @@ class OcclusionStateMachine:
         self.covered_start: Optional[float]   = None
         self.covered_last_alert: Optional[float] = None
         self.covered_safe_since: Optional[float] = None
+        # --- trạng thái MẤT MẶT (có người nhưng không thấy mặt) ---
+        self.facelost_start: Optional[float]   = None
+        self.facelost_last_alert: Optional[float] = None
+        self.facelost_safe_since: Optional[float] = None
         # --- trạng thái MẤT NGƯỜI ---
         self.absent_start: Optional[float]    = None
         self.absent_last_alert: Optional[float] = None
@@ -67,13 +83,19 @@ class OcclusionStateMachine:
     # --- backward-compat cho main.py (UI countdown) ---
     @property
     def occlusion_start(self) -> Optional[float]:
-        """Mốc bắt đầu tình huống đang diễn ra (che hoặc mất người)."""
-        return self.covered_start if self.covered_start is not None else self.absent_start
+        """Mốc bắt đầu tình huống đang diễn ra (che / mất mặt / mất người)."""
+        if self.covered_start is not None:
+            return self.covered_start
+        if self.facelost_start is not None:
+            return self.facelost_start
+        return self.absent_start
 
     @property
     def last_alert_at(self) -> Optional[float]:
         if self.covered_start is not None:
             return self.covered_last_alert
+        if self.facelost_start is not None:
+            return self.facelost_last_alert
         return self.absent_last_alert
 
     # --- helpers ---
@@ -81,6 +103,11 @@ class OcclusionStateMachine:
         self.covered_start = None
         self.covered_last_alert = None
         self.covered_safe_since = None
+
+    def _reset_facelost(self) -> None:
+        self.facelost_start = None
+        self.facelost_last_alert = None
+        self.facelost_safe_since = None
 
     def _reset_absent(self) -> None:
         self.absent_start = None
@@ -104,7 +131,10 @@ class OcclusionStateMachine:
         now: float,
         person_present: bool,
         covered: bool,
+        face_present: bool = True,
     ) -> StepResult:
+        """face_present mặc định True để tương thích ngược: caller cũ không
+        truyền tham số này → nhánh MẤT MẶT không bao giờ kích."""
 
         # === Không thấy người ===
         # KHÔNG còn gửi cảnh báo "mất người". Vẫn giữ STATE_NO_PERSON + đếm
@@ -112,6 +142,7 @@ class OcclusionStateMachine:
         # False (không Telegram, không lưu ảnh cho tình huống này).
         if not person_present:
             self._reset_covered()
+            self._reset_facelost()
             if self.absent_start is None:
                 self.absent_start = now
             elapsed = now - self.absent_start
@@ -120,7 +151,9 @@ class OcclusionStateMachine:
         # === Có người ===
         self._reset_absent()
 
+        # --- Ưu tiên 1: CHE mũi/miệng (skin detector — chỉ kích khi thấy mặt) ---
         if covered:
+            self._reset_facelost()
             self.covered_safe_since = None
             if self.covered_start is None:
                 self.covered_start = now
@@ -130,20 +163,50 @@ class OcclusionStateMachine:
             )
             return StepResult(STATE_COVERED, elapsed, should, TRIGGER_COVERED)
 
-        # Có người + không bị che
-        if self.covered_start is None:
-            self.covered_safe_since = None
-            return StepResult(STATE_SAFE, 0.0, False, "")
-
-        # Đang trong sự kiện che → anti-flicker: cần sạch liên tục đủ lâu mới reset.
-        if self.covered_safe_since is None:
-            self.covered_safe_since = now
-        if now - self.covered_safe_since >= self.safe_recovery_sec:
+        # --- Ưu tiên 2: có người nhưng MẤT MẶT (nghi vùi mặt/che kín) ---
+        # Detector skin không đánh giá được khi không thấy mặt → đây là 'điểm mù'
+        # nguy hiểm nhất. YOLO xác nhận còn người trong khung mà mặt biến mất kéo
+        # dài → cảnh báo. face_lost_sec=0 → tắt nhánh này.
+        if self.face_lost_sec > 0 and not face_present:
             self._reset_covered()
-            return StepResult(STATE_SAFE, 0.0, False, "")
-        # Chưa đủ sạch → giữ COVERED, vẫn có thể re-alert.
-        elapsed, should, self.covered_last_alert = self._maybe_fire(
-            now, self.covered_start, self.covered_last_alert,
-            self.threshold_sec, self.repeat_sec,
-        )
-        return StepResult(STATE_COVERED, elapsed, should, TRIGGER_COVERED)
+            self.facelost_safe_since = None
+            if self.facelost_start is None:
+                self.facelost_start = now
+            elapsed, should, self.facelost_last_alert = self._maybe_fire(
+                now, self.facelost_start, self.facelost_last_alert,
+                self.face_lost_sec, self.repeat_sec,
+            )
+            return StepResult(STATE_FACE_LOST, elapsed, should, TRIGGER_FACE_LOST)
+
+        # === Có người + thấy mặt + không che ===
+        # Đang thoát khỏi sự kiện CHE? anti-flicker: cần sạch liên tục đủ lâu.
+        if self.covered_start is not None:
+            if self.covered_safe_since is None:
+                self.covered_safe_since = now
+            if now - self.covered_safe_since >= self.safe_recovery_sec:
+                self._reset_covered()
+                return StepResult(STATE_SAFE, 0.0, False, "")
+            elapsed, should, self.covered_last_alert = self._maybe_fire(
+                now, self.covered_start, self.covered_last_alert,
+                self.threshold_sec, self.repeat_sec,
+            )
+            return StepResult(STATE_COVERED, elapsed, should, TRIGGER_COVERED)
+
+        # Đang thoát khỏi sự kiện MẤT MẶT? (mặt vừa hiện lại) — anti-flicker để
+        # 1 frame mediapipe nhảy landmark không reset bộ đếm của sự kiện thật.
+        if self.facelost_start is not None:
+            if self.facelost_safe_since is None:
+                self.facelost_safe_since = now
+            if now - self.facelost_safe_since >= self.safe_recovery_sec:
+                self._reset_facelost()
+                return StepResult(STATE_SAFE, 0.0, False, "")
+            elapsed, should, self.facelost_last_alert = self._maybe_fire(
+                now, self.facelost_start, self.facelost_last_alert,
+                self.face_lost_sec, self.repeat_sec,
+            )
+            return StepResult(STATE_FACE_LOST, elapsed, should, TRIGGER_FACE_LOST)
+
+        # Không có sự kiện nào → SAFE
+        self.covered_safe_since = None
+        self.facelost_safe_since = None
+        return StepResult(STATE_SAFE, 0.0, False, "")

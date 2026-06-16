@@ -2,42 +2,64 @@
 
 Báo cáo các test case đã viết và **đều PASS** tính đến lần chạy gần nhất.
 
-Logic phát hiện đã được **đơn giản hóa**: chỉ còn **2 thông báo**
-— **"Che mũi/miệng"** (mũi/miệng bị vật lạ phủ ≥ `OCCLUSION_THRESHOLD_SEC`, mặc định 15s)
-và **"Mất người"** (không thấy ai ≥ `NO_PERSON_SEC`, mặc định 15s).
-Trạng thái: `SAFE / COVERED / NO_PERSON`. Quyết định "che" **chỉ dựa trên skin-ratio drop**
+Hệ thống có **2 cảnh báo gửi Telegram**:
+— **"Che mũi/miệng"** (mũi/miệng bị vật lạ phủ ≥ `OCCLUSION_THRESHOLD_SEC`, mặc định 10s)
+và **"Mất mặt — nghi vùi/che kín"** (có người mà mất hẳn mặt ≥ `FACE_LOST_SEC`, mặc định 15s,
+0=tắt — vá điểm mù khi mặt úp hẳn vào nệm/chăn nên detector skin không đọc được mũi/miệng).
+Trạng thái **"Mất người"** (`NO_PERSON`) chỉ hiển thị/log, **KHÔNG** gửi cảnh báo.
+Trạng thái: `SAFE / COVERED / FACE_LOST / NO_PERSON`. Quyết định "che" **chỉ dựa trên skin-ratio drop**
 (mất màu da → có vật che như chăn/gối/khăn); histogram chỉ để log.
 
 | Module | Số test | Pass | Fail |
 |---|:-:|:-:|:-:|
-| `tests/test_state_machine.py` | 11 | ✅ 11 | 0 |
+| `tests/test_state_machine.py` | 17 | ✅ 17 | 0 |
 | `tests/test_occlusion_detector.py` | 12 | ✅ 12 | 0 |
 | `tests/test_scene_monitor.py` | 5 | ✅ 5 | 0 |
 | `tests/test_alert_policy.py` | 13 | ✅ 13 | 0 |
 | `tests/test_eval_metrics.py` | 11 | ✅ 11 | 0 |
-| **Tổng** | **52** | **52** | **0** |
+| `tests/test_facelost_policy.py` | 9 | ✅ 9 | 0 |
+| `tests/test_face_presence.py` | 19 | ✅ 19 | 0 |
+| **Tổng** | **86** | **86** | **0** |
 
 Lệnh chạy lại:
 ```bash
-python3 tests/test_state_machine.py      # 🎉 11/11 test PASS
+python3 tests/test_state_machine.py      # 🎉 17/17 test PASS
 python3 tests/test_occlusion_detector.py # 🎉 12/12 test PASS
 python3 tests/test_scene_monitor.py      # 🎉 5/5 test PASS
 python3 tests/test_alert_policy.py       # 🎉 13/13 test PASS
 python3 tests/test_eval_metrics.py       # 🎉 11/11 test PASS
+python3 tests/test_facelost_policy.py    # 🎉 9/9 test PASS
+python3 tests/test_face_presence.py      # 🎉 19/19 test PASS
+python3 -m compileall src tests          # COMPILEALL OK (syntax cả src + tests)
 ```
 > mediapipe in nhiều dòng WARNING/log ra stderr — bỏ qua, chỉ cần dòng "🎉 N/N test PASS".
+
+### Môi trường chạy test (lần gần nhất)
+- **Đã chạy tự động** (dev box Windows, Python 3.14, **không cần camera/mediapipe**):
+  toàn bộ 86 unit test thuần (gồm 19 test face-presence mới) + `compileall src tests` +
+  import smoke `face_presence` + AST-parse `main.py`. Tất cả PASS.
+- **CHƯA chạy ở đây (yêu cầu Raspberry Pi 4 + Logitech thật):** import/khởi chạy đầy đủ
+  `src/main.py` (dev box có numpy 2.x nên fail-fast guard chặn — đúng thiết kế; Pi 4 dùng
+  numpy<2), **benchmark pipeline 640×480**, và các kịch bản phần cứng (camera busy/unplug/
+  replug/permission, gửi Telegram thật). **KHÔNG tuyên bố số FPS Pi 4** cho tới khi chạy thật.
 
 ---
 
 ## Hai lớp lỗi cũ đã được sửa
 
-**(a) "Không thấy mặt = nguy hiểm" → giờ chỉ là "mất người".**
+**(a) "Không thấy mặt = nguy hiểm" → tách presence; nay có nhánh "mất mặt" CÓ KIỂM SOÁT.**
 Logic cũ coi việc face_mesh không còn thấy mặt là dấu hiệu bị phủ kín và đẩy thẳng sang
-cảnh báo nguy hiểm. Điều đó gây nhầm: trẻ chỉ quay đi, rời khung, hoặc tracking rớt
-cũng bị quy là "nguy hiểm". Logic mới tách bạch: **presence** (có người hay không) được
-xác định bằng MediaPipe face **HOẶC** YOLO person, giữ `PRESENCE_HOLD_SEC` (2s) để chống
-rớt track ngắn. Khi thật sự không thấy ai đủ lâu → chỉ báo **"Mất người"** (`NO_PERSON`),
-không còn quy chụp thành tình huống ngạt.
+cảnh báo nguy hiểm — gây nhầm khi trẻ chỉ quay đi / rời khung / tracking rớt. Logic giữa
+kỳ tách bạch: **presence** (có người hay không) xác định bằng MediaPipe face **HOẶC** YOLO
+person, giữ `PRESENCE_HOLD_SEC` (2s) chống rớt track ngắn; mất người chỉ hiển thị, không báo.
+
+Bản hiện tại bổ sung nhánh **"mất mặt"** (`FACE_LOST`) nhưng **có kiểm soát** để không lặp
+lại lỗi cũ: chỉ kích khi (1) **YOLO xác nhận VẪN CÒN người** trong khung (không phải rời
+khung), (2) mất mặt **liên tục ≥ `FACE_LOST_SEC`** (mặc định 15s, tránh quay đầu thoáng qua),
+(3) có **anti-flicker** 1.5s khi mặt hiện lại. Đây là phần vá đúng điểm mù nguy hiểm nhất:
+mặt úp hẳn vào nệm/chăn → mất landmark → detector skin không đọc được mũi/miệng. Đánh đổi đã
+ghi nhận: nhạy hơn với ca vùi mặt nhưng dễ báo nhầm khi bé nằm nghiêng/quay đầu lâu — chỉnh
+`FACE_LOST_SEC` hoặc đặt `0` để tắt.
 
 **(b) Tín hiệu kết cấu báo nhầm "che" trên mặt rõ → giờ quyết định bằng skin-drop.**
 Logic cũ bỏ phiếu trên nhiều tín hiệu kết cấu (mật độ cạnh + phương sai Laplacian) để
@@ -51,8 +73,9 @@ Vật che thật (chăn/gối/khăn) → mất màu da → báo.
 
 ## A. State Machine — [tests/test_state_machine.py](tests/test_state_machine.py)
 
-Test FSM (`OcclusionStateMachine`) quyết định `SAFE / COVERED / NO_PERSON` và bắn cảnh báo
-khi đủ ngưỡng. Pure logic, không phụ thuộc cv2/mediapipe. Trigger: `covered` / `no_person`.
+Test FSM (`OcclusionStateMachine`) quyết định `SAFE / COVERED / FACE_LOST / NO_PERSON` và bắn
+cảnh báo khi đủ ngưỡng. Pure logic, không phụ thuộc cv2/mediapipe. Trigger gửi cảnh báo:
+`covered` / `face_lost`. `no_person` chỉ hiển thị, không bắn alert.
 
 ### A.1 `test_safe_flow` ✅
 **Mục đích**: Có người + không che → state = `SAFE`, không báo, `elapsed = 0`.
@@ -73,14 +96,14 @@ khi đủ ngưỡng. Pure logic, không phụ thuộc cv2/mediapipe. Trigger: `c
 khoảng cách giữa các lần ≈ 15s.
 **Coverage**: re-alert định kỳ khi tình huống chưa được xử lý.
 
-### A.5 `test_no_person_fires_at_threshold` ✅
-**Mục đích**: Không thấy ai 15s liên tục → state `NO_PERSON`, trigger `no_person`,
-bắn alert đúng tại t=15.0.
-**Coverage**: ngưỡng "mất người".
+### A.5 `test_no_person_never_alerts` ✅
+**Mục đích**: Không thấy ai → state `NO_PERSON`, trigger `no_person`, vẫn đếm `elapsed` để
+hiển thị NHƯNG `should_alert` luôn `False` (kể cả tại/qua ngưỡng).
+**Coverage**: "mất người" KHÔNG gửi cảnh báo (chỉ hiển thị/log).
 
-### A.6 `test_no_person_repeats` ✅
-**Mục đích**: Mất người kéo dài → nhắc lại mỗi chu kỳ; trong 47s nhắc **3 lần** (~15, 30, 45).
-**Coverage**: re-alert định kỳ cho "mất người".
+### A.6 `test_no_person_never_alerts_long` ✅
+**Mục đích**: Mất người kéo dài rất lâu (120s) → vẫn KHÔNG có lần bắn alert nào.
+**Coverage**: xác nhận "mất người" không bao giờ spam Telegram.
 
 ### A.7 `test_person_returns_clears_no_person` ✅
 **Mục đích**: Đang đếm "mất người", người quay lại → về `SAFE` ngay, dừng đếm (`absent_start = None`).
@@ -103,6 +126,33 @@ bắn alert đúng tại t=15.0.
 **Mục đích**: Các thuộc tính tương thích ngược `occlusion_start` / `last_alert_at` vẫn dùng được
 cho UI đếm ngược: `occlusion_start` = thời điểm bắt đầu che, `last_alert_at` được đặt khi bắn alert.
 **Coverage**: UI countdown không vỡ sau khi đổi logic.
+
+### A.12 `test_face_lost_fires_at_threshold` ✅
+**Mục đích**: Có người (YOLO) nhưng mất mặt liên tục 15s → state `FACE_LOST`, trigger
+`face_lost`, bắn alert đúng tại t=15.0 (t=14.9 chưa bắn), không bắn lại ngay sau đó.
+**Coverage**: ngưỡng nhánh "mất mặt / nghi vùi che kín".
+
+### A.13 `test_face_present_is_safe` ✅
+**Mục đích**: Có người + thấy mặt + không che → `SAFE` (không kích nhánh mất mặt).
+**Coverage**: thấy mặt = an toàn, không báo nhầm.
+
+### A.14 `test_face_lost_disabled` ✅
+**Mục đích**: `face_lost_sec=0` → dù mất mặt kéo dài 60s vẫn luôn `SAFE`, không bắn lần nào.
+**Coverage**: tắt được nhánh mất mặt bằng config (cho ai thấy phiền vì báo nhầm).
+
+### A.15 `test_face_lost_recovery_anti_flicker` ✅
+**Mục đích**: Mất mặt rồi mặt hiện lại → chỉ reset sau khi thấy mặt đủ lâu
+(`safe_recovery_sec`=1.5s). 0.5s thấy mặt chưa đủ (vẫn `FACE_LOST`); 1.5s → `SAFE`.
+**Coverage**: 1 frame mediapipe nhảy landmark không reset oan bộ đếm sự kiện thật.
+
+### A.16 `test_covered_takes_priority_over_face_lost` ✅
+**Mục đích**: `covered=True` (kể cả khi `face_present=False`) luôn ưu tiên → `COVERED`,
+không vào nhánh mất mặt.
+**Coverage**: thứ tự ưu tiên rõ ràng giữa 2 nguy cơ đường thở.
+
+### A.17 `test_face_lost_needs_person` ✅
+**Mục đích**: Mất mặt nhưng cũng mất người (không YOLO) → `NO_PERSON`, không báo mất mặt.
+**Coverage**: nhánh mất mặt chỉ kích khi YOLO xác nhận CÒN người trong khung.
 
 ---
 
@@ -274,6 +324,73 @@ Nếu không điểm nào đạt trần FPR → trả về `None`.
 
 ### E.11 `test_best_by_youden_and_f1_run` ✅
 `best_by_youden` (J = tpr − fpr) và `best_by_f1` chạy đúng; phân tách hoàn hảo → J=1, F1=1.
+
+---
+
+## F. Face-Lost Policy — [tests/test_facelost_policy.py](tests/test_facelost_policy.py)
+
+Test logic THUẦN cho 3 lớp giảm báo nhầm khi mất mặt — [src/facelost_policy.py](src/facelost_policy.py).
+Không phụ thuộc cv2/mediapipe (BlazeFace thật chạy ở `main.py`, đánh giá thủ công).
+
+### F.1 `test_yaw_frontal_is_zero` ✅
+Mũi giữa 2 mép mặt → `estimate_yaw_proxy` ~0 (chính diện).
+
+### F.2 `test_yaw_turned_positive` ✅
+Mũi lệch về mép phải → yaw dương lớn (đúng tỉ lệ chuẩn hóa theo bề ngang mặt).
+
+### F.3 `test_yaw_clamped` ✅
+Mũi lệch quá biên → yaw kẹp trong `[-1, 1]`.
+
+### F.4 `test_yaw_degenerate_edges` ✅
+2 mép trùng nhau (suy biến) → 0.0, không chia 0.
+
+### F.5 `test_classify_none_is_covered` ✅
+Không có dữ liệu yaw gần (mất mặt đã lâu) → mặc định `covered` (an-toàn-trước → báo to).
+
+### F.6 `test_classify_profile_is_turned` ✅
+\|yaw\| ≥ ngưỡng (đang xoay nghiêng) → `turned` (thiên về an toàn). Kiểm cả biên `>=`.
+
+### F.7 `test_classify_frontal_is_covered` ✅
+\|yaw\| nhỏ (còn chính diện) mà mất mặt → `covered` (nghi bị che đột ngột).
+
+### F.8 `test_severity_covered_always_loud` ✅
+manner=`covered` → luôn báo TO ngay, kể cả mới mất mặt.
+
+### F.9 `test_severity_turned_soft_then_loud` ✅
+manner=`turned` → nhắc NHẸ trước; leo thang lên TO khi `elapsed ≥ escalate_sec` (kiểm biên).
+
+---
+
+## G. Face-Presence FSM — [tests/test_face_presence.py](tests/test_face_presence.py)
+
+Test FSM THUẦN cho thông báo **"phát hiện khuôn mặt ổn định"** (text-only) —
+[src/face_presence.py](src/face_presence.py). **TÁCH HẲN** state machine an toàn
+(`SAFE/COVERED/FACE_LOST/NO_PERSON`): chỉ là FACE DETECTION, không nhận dạng danh
+tính, không embedding, không lưu/gửi ảnh, không sinh trắc học, KHÔNG khẳng định là "bé".
+States: `INITIALIZING → NO_FACE → FACE_CANDIDATE → FACE_CONFIRMED → NOTIFIED →
+WAITING_FOR_FACE_EXIT → NO_FACE`. Mọi `now` tường minh → mô phỏng monotonic clock.
+
+| # | Test | Mục đích |
+|:-:|---|---|
+| 1 | `test_startup_no_face_no_event` | Khởi động không mặt → **không** event, app im lặng. |
+| 2 | `test_transient_detection_not_confirmed` | Mặt thoáng qua (<confirm) → không confirm, không event. |
+| 3 | `test_stable_face_one_event` | Mặt ổn định đủ frame+thời gian → **đúng 1** event. |
+| 4 | `test_face_stays_no_second_event` | Mặt đứng nguyên 20s → **không** event thứ hai. |
+| 5 | `test_brief_miss_no_rearm` | Miss vài frame (<exit) → không re-arm, không event mới. |
+| 6 | `test_all_faces_leave_rearm` | Tất cả mặt rời đủ lâu → re-arm về `NO_FACE`. |
+| 7 | `test_return_after_cooldown_second_event` | Rời rồi trở lại **sau** cooldown → event thứ hai (id mới). |
+| 8 | `test_return_before_cooldown_no_event` | Trở lại **trước** cooldown → chưa thông báo. |
+| 9 | `test_multiple_faces_one_event` | Nhiều mặt (3) → vẫn chỉ **1** event (không theo từng mặt). |
+| 10 | `test_one_of_many_remains_no_rearm` | 1 trong nhiều mặt còn lại → **chưa** re-arm. |
+| 11 | `test_camera_unavailable_no_event` | Camera unavailable (`ready=False`) → không crash, không event. |
+| 12 | `test_permission_denied_no_event` | Permission denied (detector lỗi) → không crash, freeze. |
+| 13 | `test_camera_reconnect_no_fake_event` | Camera rớt (freeze) rồi nối lại → **không** event giả. |
+| 14 | `test_telegram_retry_no_duplicate_fsm_event` | FSM phát 1 event id ổn định; retry Telegram không tạo event mới. |
+| 15 | `test_dispose_multiple_times_no_exception` | `OnceGuard` dispose nhiều lần → chạy đúng 1 lần, không exception. |
+| 16 | `test_camera_released_exactly_once` | Release camera đúng **một** lần dù gọi từ nhiều đường thoát. |
+| 17 | `test_single_flight_blocks_second_session` | Analysis đang bận → chặn phiên thứ hai (bỏ frame, không queue). |
+| 18 | `test_monotonic_offset_invariant` | Đổi offset đồng hồ lớn → kết quả y hệt (chỉ dùng hiệu `now`). |
+| + | `test_is_valid_detection_rules` | Lọc detection: confidence, area tối thiểu, bbox âm/tràn biên. |
 
 ---
 

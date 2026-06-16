@@ -25,7 +25,7 @@
 
 > *Câu mở đầu khi giới thiệu với hội đồng. Học thuộc, nói trơn tru.*
 
-**"Đề tài của em là hệ thống cảnh báo cho cha mẹ trẻ sơ sinh bằng AI, chạy trên máy tính nhúng Raspberry Pi 4. Hệ thống dùng camera quan sát trẻ liên tục, dùng MediaPipe để xác định vị trí mũi và miệng, sau đó kiểm tra xem vùng mũi/miệng có còn là màu da hay đã bị vật lạ (chăn/gối/khăn/giấy) che. Hệ thống chỉ gửi 2 loại thông báo: (1) khi mũi/miệng bị che liên tục quá 15 giây, và (2) khi không thấy ai trong khung quá 15 giây. Mỗi thông báo gửi về Telegram cho cha mẹ kèm ảnh chụp tại thời điểm đó. Toàn bộ chạy CPU-only trên Raspberry Pi 4, không cần GPU, hoạt động real-time khoảng 6-8 khung hình mỗi giây ở độ phân giải 640×480."**
+**"Đề tài của em là hệ thống cảnh báo cho cha mẹ trẻ sơ sinh bằng AI, chạy trên máy tính nhúng Raspberry Pi 4. Hệ thống dùng camera quan sát trẻ liên tục, dùng MediaPipe để xác định vị trí mũi và miệng, sau đó kiểm tra xem vùng mũi/miệng có còn là màu da hay đã bị vật lạ (chăn/gối/khăn/giấy) che. Hệ thống gửi 2 loại cảnh báo: (1) khi mũi/miệng bị che liên tục quá ngưỡng, và (2) khi vẫn còn người trong khung nhưng mất hẳn khuôn mặt quá ngưỡng — nghi mặt bị vùi vào nệm/chăn (vá đúng ca nguy hiểm mà phương pháp so màu da bỏ sót vì khi mất mặt thì không đọc được mũi/miệng). Mỗi thông báo gửi về Telegram cho cha mẹ kèm ảnh chụp tại thời điểm đó. Toàn bộ chạy CPU-only trên Raspberry Pi 4, không cần GPU, hoạt động real-time khoảng 6-8 khung hình mỗi giây ở độ phân giải 640×480."**
 
 ### 4 điểm mạnh để khoe ngay:
 1. **Real-time trên thiết bị nhúng giá rẻ** (Raspberry Pi 4 ~1.5 triệu VND) — không cần cloud, không cần GPU
@@ -44,12 +44,13 @@ baby-ai-alert/
 │
 ├── src/                              ← "Khu vực chính" — code chạy app
 │   ├── main.py                       ← Phòng khách: tiếp nhận camera, điều phối
-│   ├── state_machine.py              ← Phòng não: quyết định khi nào báo che / mất người
+│   ├── state_machine.py              ← Phòng não: quyết định khi nào báo che mũi/miệng / mất mặt
 │   ├── occlusion_detector.py         ← Phòng mắt: nhìn và phân tích pixel mũi/miệng
 │   ├── scene_monitor.py              ← Phòng cảm biến: blur-gate + motion + luma
-│   └── alert_policy.py               ← Phòng đồng hồ: timing watchdog/heartbeat/nhắc hiệu chỉnh
+│   ├── alert_policy.py               ← Phòng đồng hồ: timing watchdog/heartbeat/nhắc hiệu chỉnh
+│   └── facelost_policy.py            ← Phòng phân loại: yaw + 'nằm nghiêng vs bị che' + mức cảnh báo
 │
-├── tests/                            ← Kho kiểm thử (52 unit test)
+├── tests/                            ← Kho kiểm thử (67 unit test)
 │   ├── test_state_machine.py         (14 test cho FSM)
 │   ├── test_occlusion_detector.py    (16 test cho detector)
 │   ├── test_scene_monitor.py         (7 test cho blur/motion/luma)
@@ -78,7 +79,7 @@ baby-ai-alert/
 
 ### Tại sao chia 3 file mà không gộp 1?
 
-**Câu trả lời chuẩn**: *"Em chia theo nguyên tắc Separation of Concerns. State machine không cần biết về OpenCV hay MediaPipe, nó chỉ nhận input boolean và quyết định state. Detector không cần biết về Telegram hay camera. Tách ra giúp em viết unit test cho state machine mà không cần camera thật — em có 52 test pass 100%. Nếu mai sau đổi từ MediaPipe sang model khác, em chỉ cần thay detector, state machine không phải đụng."*
+**Câu trả lời chuẩn**: *"Em chia theo nguyên tắc Separation of Concerns. State machine không cần biết về OpenCV hay MediaPipe, nó chỉ nhận input boolean và quyết định state. Detector không cần biết về Telegram hay camera. Tách ra giúp em viết unit test cho state machine mà không cần camera thật — em có 67 test pass 100%. Nếu mai sau đổi từ MediaPipe sang model khác, em chỉ cần thay detector, state machine không phải đụng."*
 
 ---
 
@@ -156,7 +157,10 @@ baby-ai-alert/
    - Histogram HSV (phân bố màu) — chỉ để hiển thị/log
 6. **Quyết định "bị che"**: nếu vùng mũi HOẶC miệng có skin ratio tụt sâu (mất màu da → có vật che) thì coi là bị che. Vote hiển thị dạng `/2` (skin + hist) nhưng chỉ skin quyết định.
 7. **Smoother** (lọc nhiễu): cần ≥7/10 frame liên tiếp nói "bị che" mới chính thức coi là bị che → tránh false alert do landmark nhảy 1 frame.
-8. **State machine**: nếu mũi/miệng bị che liên tục 15 giây → báo **CHE MŨI/MIỆNG**; nếu không thấy ai trong khung liên tục 15 giây → báo **MẤT NGƯỜI**.
+8. **State machine** — có **2 cảnh báo** gửi Telegram:
+   - **CHE MŨI/MIỆNG**: có người + mũi/miệng bị che liên tục `OCCLUSION_THRESHOLD_SEC` giây.
+   - **MẤT MẶT (nghi vùi/che kín)**: có người (YOLO xác nhận) nhưng **mất mặt** liên tục `FACE_LOST_SEC` giây → vá điểm mù khi mặt úp hẳn vào nệm/chăn (mất landmark → detector skin không đọc được).
+   - Trạng thái **MẤT NGƯỜI** (không thấy ai trong khung) chỉ hiển thị/log, **KHÔNG** gửi cảnh báo.
 9. **Gửi thông báo**:
    - Lưu ảnh JPG + JSON metadata vào `events/`
    - Gửi ảnh + caption qua Telegram Bot API (chạy ở thread riêng để không chặn pipeline)
@@ -166,8 +170,9 @@ baby-ai-alert/
 | Thông số | Giá trị | Ý nghĩa |
 |---|---|---|
 | **FPS pipeline** | 6-8 FPS | Tốc độ thực tế trên Raspberry Pi 4 (640×480) |
-| **Ngưỡng báo che** | 15 giây | Mũi/miệng bị che liên tục bao lâu thì báo (`OCCLUSION_THRESHOLD_SEC`) |
-| **Ngưỡng mất người** | 15 giây | Không thấy ai bao lâu thì báo (`NO_PERSON_SEC`) |
+| **Ngưỡng báo che** | 10 giây | Mũi/miệng bị che liên tục bao lâu thì báo (`OCCLUSION_THRESHOLD_SEC`) |
+| **Ngưỡng mất mặt** | 15 giây | Có người mà mất mặt bao lâu thì báo "nghi vùi/che kín" (`FACE_LOST_SEC`, 0=tắt) |
+| **Ngưỡng mất người** | 15 giây | Không thấy ai bao lâu → trạng thái `NO_PERSON` (chỉ hiển thị, không gửi) (`NO_PERSON_SEC`) |
 | **Giữ presence** | 2 giây | Giữ "có người" sau lần thấy gần nhất (`PRESENCE_HOLD_SEC`) |
 | **Calibration** | 5 giây | Thời gian học baseline khuôn mặt trẻ |
 | **Smoother** | 7/10 frame | Lọc nhiễu trước state machine |
@@ -247,30 +252,32 @@ class SmoothingBuffer:
 
 ### 4.6 State Machine — "não bộ ra quyết định"
 
-**3 trạng thái cấp UI** (cộng pha CALIBRATING khi mới khởi động):
+**4 trạng thái cấp UI** (cộng pha CALIBRATING khi mới khởi động):
 
 | Trạng thái | Khi nào | Hành động |
 |---|---|---|
 | **CALIBRATING** | 5 giây đầu khi thấy mặt | Học baseline |
-| **NO_PERSON** | Không thấy mặt VÀ YOLO cũng không thấy người (đã quá thời gian giữ presence) | Đếm 15s → báo "Không thấy ai trong khung" |
+| **NO_PERSON** | Không thấy mặt VÀ YOLO cũng không thấy người (đã quá thời gian giữ presence) | Đếm `elapsed` để hiển thị — **KHÔNG** gửi cảnh báo |
 | **SAFE** | Có người, vùng mũi/miệng còn màu da | Giám sát bình thường |
-| **COVERED** | Có người, vùng mũi/miệng mất màu da (đang đếm/đã báo) | Đếm 15s → báo "Mũi/miệng bị che" |
+| **COVERED** | Có người, vùng mũi/miệng mất màu da (đang đếm/đã báo) | Đếm `OCCLUSION_THRESHOLD_SEC` → báo "Mũi/miệng bị che" |
+| **FACE_LOST** | Có người (YOLO) nhưng MẤT hẳn mặt — nghi vùi/che kín (đang đếm/đã báo) | Đếm `FACE_LOST_SEC` → báo "Không thấy mặt bé — nghi bị vùi/che kín" |
 
-**2 trigger dẫn đến thông báo**:
-1. `covered` (`TRIGGER_COVERED`) — có người + vùng mũi/miệng bị che liên tục ≥ 15s.
-2. `no_person` (`TRIGGER_NO_PERSON`) — không thấy ai trong khung liên tục ≥ 15s.
+**2 trigger gửi cảnh báo + 1 trạng thái chỉ hiển thị**:
+1. `covered` (`TRIGGER_COVERED`) — có người + vùng mũi/miệng bị che liên tục ≥ `OCCLUSION_THRESHOLD_SEC` → **gửi cảnh báo**.
+2. `face_lost` (`TRIGGER_FACE_LOST`) — có người (YOLO xác nhận) nhưng mất hẳn mặt liên tục ≥ `FACE_LOST_SEC` → **gửi cảnh báo** "nghi vùi/che kín".
+3. `no_person` (`TRIGGER_NO_PERSON`) — không thấy ai trong khung → chỉ đếm để hiển thị/log, **KHÔNG** gửi cảnh báo.
 
-> *Không còn khái niệm "ngạt thở / nghi bị phủ kín". "Mất người" chỉ là thông báo sự việc ("không thấy ai trong khung"), KHÔNG suy diễn nguy hiểm.*
+> *Không còn khái niệm "ngạt thở / nghi bị phủ kín" theo kiểu suy diễn cũ. "Mất người" chỉ là thông báo sự việc trên màn hình, KHÔNG gửi Telegram. Nhánh `face_lost` mới chính là phần "vá điểm mù" cho ca mặt bị vùi (mất mặt mà vẫn còn người).*
 
 **Câu thoại giải thích**:
-> *"Em không gửi thông báo ngay khi phát hiện che — có thể là che chớp 1 giây không sao. Em đếm 15 giây liên tục. Có anti-flicker: phải sạch trở lại liên tục đủ lâu (1.5s) mới reset bộ đếm, nên 1 frame nhiễu không làm reset oan. Tương tự cho 'mất người'. Sau lần đầu đủ ngưỡng, nếu tình huống còn kéo dài thì nhắc lại định kỳ đến khi hết."*
+> *"Em không gửi thông báo ngay khi phát hiện che — có thể là che chớp 1 giây không sao. Em đếm liên tục đủ ngưỡng. Có anti-flicker: phải sạch trở lại liên tục đủ lâu (1.5s) mới reset bộ đếm, nên 1 frame nhiễu không làm reset oan. Tương tự cho 'mất mặt'. Sau lần đầu đủ ngưỡng, nếu tình huống còn kéo dài thì nhắc lại định kỳ đến khi hết."*
 
 ### 4.7 YOLO — phân biệt "còn người" vs "không còn ai"
 
 **Tại sao có YOLO?**
 
-> *"YOLO không phát hiện bị che — đó là việc của detector chính. Vai trò của YOLO là giúp xác định CÓ NGƯỜI trong khung hay không. 'Có người' = MediaPipe thấy mặt HOẶC YOLO thấy người. Nhờ YOLO, khi bé quay đầu / úp mặt (MediaPipe không thấy mặt nhưng YOLO vẫn thấy thân người) thì hệ thống biết VẪN CÒN người trong khung → KHÔNG báo nhầm 'mất người', và cũng không tạo cảnh báo che mới vì không quan sát được mũi/miệng.*
-> *Ngược lại, khi thật sự không còn ai (cả MediaPipe lẫn YOLO đều không thấy) liên tục quá 15s → báo 'Không thấy ai trong khung'."*
+> *"YOLO không phát hiện bị che — đó là việc của detector chính. Vai trò của YOLO là giúp xác định CÓ NGƯỜI trong khung hay không. 'Có người' = MediaPipe thấy mặt HOẶC YOLO thấy người. Nhờ YOLO, khi bé úp mặt/mặt bị vùi (MediaPipe không thấy mặt nhưng YOLO vẫn thấy thân người) thì hệ thống biết VẪN CÒN người mà mặt biến mất → đếm tới `FACE_LOST_SEC` rồi báo 'MẤT MẶT — nghi vùi/che kín'. Đây chính là lý do YOLO bắt buộc phải bật cho nhánh này hoạt động.*
+> *Ngược lại, khi thật sự không còn ai (cả MediaPipe lẫn YOLO đều không thấy) → trạng thái 'Không thấy ai trong khung', chỉ hiển thị, KHÔNG gửi cảnh báo."*
 >
 > *"Để mặt nhìn rõ KHÔNG bao giờ bị báo nhầm 'mất người', em giữ thêm `PRESENCE_HOLD_SEC` (mặc định 2s) sau lần thấy gần nhất — MediaPipe trên Pi 4 đôi khi rớt track vài frame, nhưng trong 2s đó vẫn coi là 'có người'."*
 
@@ -279,6 +286,23 @@ class SmoothingBuffer:
 
 **Tại sao không chạy YOLO mỗi frame?**
 > *"Để tối ưu CPU. Trên Pi 4 em set `YOLO_EVERY=10` — chỉ chạy 1 lần mỗi 10 frame, cache kết quả. Lý do: xác định 'còn người trong khung hay không' không cần real-time — 1-2 lần/giây là dư."*
+
+---
+
+### 4.8 Ba lớp giảm BÁO NHẦM khi bé nằm nghiêng / quay đầu ⭐
+
+**Vấn đề**: "mất mặt" là tín hiệu mơ hồ — gộp 2 tình huống ngược nhau: *nguy hiểm* (mặt úp hẳn vào nệm/trùm kín → tắc đường thở) và *an toàn* (bé chỉ quay/nghiêng, mặt vẫn lộ nhưng FaceMesh không dựng đủ landmark). Nếu chỉ dùng một ngưỡng thời gian thì bé nằm nghiêng lâu sẽ bị báo nhầm. Em xử lý bằng **3 lớp** (đều CPU-only, có unit test riêng trong `test_facelost_policy.py`):
+
+| Lớp | Cơ chế | Tác dụng |
+|---|---|---|
+| **Lớp 1 — BlazeFace fallback** | Khi FaceMesh mất mặt, chạy thêm `mp.solutions.face_detection` (BlazeFace, full-range) — **bền với góc nghiêng** hơn FaceMesh. Mặt còn nhìn thấy = FaceMesh **HOẶC** BlazeFace thấy. | Bé quay/nghiêng mà BlazeFace vẫn thấy mặt → **KHÔNG tính mất mặt**. Chỉ khi **cả hai tầng** đều mất mặt mới đếm `FACE_LOST`. *(Giảm báo nhầm mạnh nhất.)* |
+| **Lớp 3 — head-pose** | Trước khi mất mặt, ước lượng **yaw** (góc xoay đầu) từ landmark mũi vs 2 mép mặt. Mất mặt khi \|yaw\| lớn → *đang nằm nghiêng*; mất khi còn gần chính diện → *nghi bị che đột ngột*. | Phân loại nguyên nhân biến mất → quyết định báo nhẹ hay khẩn. Mất-mặt-khi-chính-diện = đáng ngờ → báo khẩn ngay. |
+| **Lớp 2 — cảnh báo leo thang** | Ca 'nằm nghiêng' → tin **NHẸ** "không thấy rõ mặt bé, có thể nằm nghiêng — kiểm tra giúp"; chỉ khi kéo dài ≥ `FACE_LOST_ESCALATE_SEC` mới **leo thang** lên cảnh báo KHẨN. | False-positive còn sót chỉ là cú nhắc nhẹ (không gây *alarm fatigue*); ca vùi mặt thật kéo dài thì vẫn kêu to. |
+
+**Câu thoại bảo vệ**:
+> *"Điểm khó nhất của nhánh mất-mặt là phân biệt 'bé nằm nghiêng (an toàn)' với 'mặt bị vùi (nguy hiểm)' — cả hai đều làm FaceMesh mất mặt. Em giải bằng 3 lớp: (1) BlazeFace là tầng phát hiện mặt phụ bền với góc nghiêng, mặt nghiêng vẫn thấy thì em không báo; (2) head-pose — nếu mặt biến mất trong lúc đang xoay nghiêng thì em coi là tư thế bình thường, báo nhẹ; nếu biến mất khi còn chính diện thì nghi bị che đột ngột, báo khẩn ngay; (3) leo thang — ca nằm nghiêng chỉ nhắc nhẹ, kéo dài quá lâu mới báo khẩn. Nhờ vậy em giảm tối đa báo nhầm mà vẫn không bỏ sót ca úp mặt vào nệm. Phần logic thuần (yaw, phân loại, mức độ) em tách module riêng và có 9 unit test."*
+
+> ⚠️ *Em trung thực về giới hạn: nếu camera nhìn nghiêng/từ trên xuống mà bé úp mặt ở góc cực hiếm, hoặc ban đêm thiếu sáng, cả 2 tầng phát hiện mặt đều có thể sai. Đó là lý do em vẫn để chỉnh được `FACE_LOST_SEC`/`FACE_LOST_PROFILE_YAW` và đề xuất thêm IR cam + cảm biến hô hấp ở phiên bản sau.*
 
 ---
 
@@ -403,7 +427,7 @@ A: *"Để biến input liên tục (mỗi frame là 1 boolean 'occluded/not') t
 
 **Q27. Em có mấy state, kể tên?**
 
-A: *"3 state cấp UI: SAFE (có người, mũi/miệng nhìn rõ), COVERED (có người, mũi/miệng bị che — đang đếm/đã báo), NO_PERSON (không thấy ai trong khung). Cộng pha CALIBRATING (5s đầu học baseline) khi mới khởi động."*
+A: *"4 state cấp UI: SAFE (có người, mũi/miệng nhìn rõ), COVERED (có người, mũi/miệng bị che — đang đếm/đã báo), FACE_LOST (có người nhưng mất hẳn mặt — nghi vùi/che kín, đang đếm/đã báo), NO_PERSON (không thấy ai trong khung — chỉ hiển thị). Cộng pha CALIBRATING (5s đầu học baseline) khi mới khởi động."*
 
 **Q28. Khi nào chuyển từ SAFE sang COVERED?**
 
@@ -415,11 +439,11 @@ A: *"Khi mũi/miệng sạch trở lại. Em có anti-flicker: phải sạch li�
 
 **Q30. <u>Khi không thấy mặt trẻ thì sao? Báo ngay không?</u>**
 
-A: *"Không báo ngay vì 'không thấy mặt' chưa chắc là 'không có người'. 'Có người' = MediaPipe thấy mặt HOẶC YOLO thấy người, và em còn giữ 'có người' thêm `PRESENCE_HOLD_SEC` (mặc định 2s) sau lần thấy gần nhất. Chỉ khi thật sự không còn ai (cả MediaPipe lẫn YOLO đều không thấy) liên tục 15s → mới báo 'Không thấy ai trong khung'."*
+A: *"Không báo NGAY, nhưng có xử lý. 'Có người' = MediaPipe thấy mặt HOẶC YOLO thấy người, em giữ 'có người' thêm `PRESENCE_HOLD_SEC` (mặc định 2s) sau lần thấy gần nhất. Có 2 nhánh: (1) nếu YOLO xác nhận VẪN CÒN người mà mặt biến mất liên tục quá `FACE_LOST_SEC` (mặc định 15s) → báo 'MẤT MẶT — nghi vùi/che kín' (đây là ca nguy hiểm: mặt úp hẳn vào nệm thì không đọc được mũi/miệng); (2) nếu cả MediaPipe lẫn YOLO đều không thấy ai → trạng thái 'Không thấy ai trong khung' nhưng CHỈ hiển thị/log, KHÔNG gửi cảnh báo (vì có thể cha mẹ đã bế bé ra)."*
 
 **Q31. <u>Làm sao phân biệt 'bé quay đầu/úp mặt (còn người)' vs 'không còn ai'? Cả hai đều không thấy mặt.</u>**
 
-A: *"Em dùng YOLO để xác định CÓ NGƯỜI. Khi MediaPipe không thấy mặt (bé quay đầu/úp mặt) nhưng YOLO vẫn thấy thân người → hệ thống biết VẪN CÒN người → KHÔNG báo 'mất người', đồng thời không tạo cảnh báo che mới vì lúc đó không quan sát được mũi/miệng. Chỉ khi cả MediaPipe lẫn YOLO đều không thấy (quá thời gian giữ presence) → mới báo 'Không thấy ai trong khung'. Đây là một thông báo sự việc, KHÔNG suy diễn nguy hiểm."*
+A: *"Em dùng YOLO để xác định CÓ NGƯỜI. Khi MediaPipe không thấy mặt nhưng YOLO vẫn thấy thân người → hệ thống biết VẪN CÒN người trong khung mà mặt bị che/vùi → đếm tới `FACE_LOST_SEC` rồi báo 'MẤT MẶT — nghi vùi/che kín' (vá đúng điểm mù của detector skin). Còn khi cả MediaPipe lẫn YOLO đều không thấy (quá thời gian giữ presence) → trạng thái 'Không thấy ai trong khung', chỉ hiển thị, KHÔNG gửi cảnh báo. Đánh đổi: nhánh MẤT MẶT dễ báo nhầm khi bé nằm nghiêng/quay đầu lâu hơn `FACE_LOST_SEC` — chỉnh ngưỡng này hoặc đặt 0 để tắt."*
 
 **Q32. Có thể báo mà không cần đếm 15 giây không?**
 
@@ -463,12 +487,13 @@ A: *"Trên Raspberry Pi 4 CPU-only: ~6-8 FPS end-to-end ở 640×480. Breakdown:
 
 **Q40. Em test đề tài thế nào? Có bao nhiêu test case?**
 
-A: *"Em có 52 unit test, chia 5 file:*
-- *test_state_machine.py — 11 test cho FSM: safe flow, báo che fire ở ngưỡng, anti-flicker khi hết che, nhắc lại định kỳ, báo mất người ở ngưỡng, người quay lại xóa NO_PERSON, chỉ báo che khi có người...*
+A: *"Em có 67 unit test, chia 6 file:*
+- *test_state_machine.py — 17 test cho FSM: safe flow, báo che fire ở ngưỡng, anti-flicker khi hết che, nhắc lại định kỳ, mất người KHÔNG báo, chỉ báo che khi có người, báo MẤT MẶT ở ngưỡng + anti-flicker + che ưu tiên hơn mất mặt + tắt được bằng FACE_LOST_SEC=0...*
 - *test_occlusion_detector.py — 12 test cho detector: calibration, phát hiện chăn (skin thấp), chăn đỏ, mặt sạch có jitter KHÔNG báo nhầm, không update baseline khi đang che...*
 - *test_scene_monitor.py — 5 test cho blur-gate + frozen-frame + luma (watchdog).*
 - *test_alert_policy.py — 13 test cho logic timing: watchdog cảnh báo/khôi phục, heartbeat, nhắc hiệu chỉnh, cảnh báo khi điều kiện hiệu chỉnh kém (tối/mờ).*
 - *test_eval_metrics.py — 11 test cho logic đo lường (precision/recall/FPR/ROC/AUC + chọn ngưỡng tối ưu) dùng cho bộ công cụ đánh giá detector trên dữ liệu thật.*
+- *test_facelost_policy.py — 9 test cho 3 lớp giảm báo nhầm khi mất mặt: ước lượng yaw (chính diện/nghiêng/kẹp/suy biến), phân loại 'nằm nghiêng' vs 'bị che', và mức cảnh báo nhẹ→khẩn theo manner + thời gian.*
 *Đặc biệt em có test_clear_face_with_jitter_no_false_alert để đảm bảo mặt sạch (kể cả khi landmark nhảy) KHÔNG bị báo nhầm — đây là failure mode em đặc biệt verify."*
 
 **Q41. Tỷ lệ false positive / false negative bao nhiêu?**
@@ -478,9 +503,10 @@ A: *"Em test với các kịch bản thực tế:*
 - *Chăn phủ mũi/miệng 20 giây → báo che đúng (TP=100%).*
 - *Khăn/giấy phủ mặt 20 giây → báo che đúng (TP=100%).*
 - *Khung trống chưa đặt trẻ → KHÔNG báo che (vì không có người).*
-- *Bé quay đầu/úp mặt nhưng YOLO vẫn thấy người → KHÔNG báo 'mất người'.*
-- *Bế bé ra khỏi khung > 15s → báo 'Không thấy ai trong khung' (đúng, đây là thông báo sự việc).*
-*Đây là test định tính, chưa có dataset chuẩn để báo cáo định lượng — điểm em sẽ improve."*
+- *Bé úp mặt/mặt bị vùi nhưng YOLO vẫn thấy người, quá `FACE_LOST_SEC` → báo 'MẤT MẶT — nghi vùi/che kín' (đây là điểm mù cũ nay đã vá).*
+- *Bé quay đầu/nằm nghiêng NGẮN (< `FACE_LOST_SEC`) → anti-flicker không báo.*
+- *Bế bé ra khỏi khung → trạng thái 'Không thấy ai' (chỉ hiển thị/log, KHÔNG gửi cảnh báo).*
+*Đây là test định tính, chưa có dataset chuẩn để báo cáo định lượng — điểm em sẽ improve. Lưu ý nhánh MẤT MẶT đánh đổi: nhạy hơn với ca vùi mặt nhưng dễ báo nhầm khi bé nằm nghiêng/quay đầu lâu — chỉnh `FACE_LOST_SEC` để cân bằng."*
 
 **Q42. <u>Nếu hội đồng hỏi "tại sao không có dataset chuẩn?"</u>**
 
@@ -498,7 +524,7 @@ A: *"File MD lớn INSTALL_PI4.md hướng dẫn deploy từ A-Z trên Raspberry
 
 **Q45. Hạn chế của đề tài là gì?**
 
-A: *"Em thẳng thắn: (1) Ánh sáng yếu/ban đêm chưa test kỹ — MediaPipe có thể mất tracking. (2) Khi trẻ úp mặt xuống nệm, MediaPipe không thấy mũi/miệng nên hệ thống KHÔNG tạo được cảnh báo che (chỉ đánh giá được khi thấy mặt); nếu YOLO vẫn thấy thân người thì hệ thống coi là 'còn người' và im lặng — đây là hạn chế em ghi nhận. (3) Đề tài chưa có IR camera cho ban đêm — em đang thiết kế phiên bản v6 thêm IR cam."*
+A: *"Em thẳng thắn: (1) Ánh sáng yếu/ban đêm chưa test kỹ — MediaPipe có thể mất tracking. (2) Khi trẻ úp mặt xuống nệm, MediaPipe không thấy mũi/miệng nên detector che (so màu da) không đánh giá được — em đã vá bằng nhánh `FACE_LOST` + **3 lớp giảm báo nhầm** (xem §4.8): BlazeFace bền góc nghiêng (mặt nghiêng vẫn thấy → không báo), head-pose phân biệt 'nằm nghiêng' vs 'bị che', và cảnh báo leo thang nhẹ→khẩn. Vẫn còn đánh đổi nhỏ ở góc cực hiếm/ban đêm nên em cho chỉnh `FACE_LOST_SEC`/`FACE_LOST_PROFILE_YAW`. (3) Đề tài chưa có IR camera cho ban đêm — em đang thiết kế phiên bản v6 thêm IR cam + cảm biến hô hấp."*
 
 **Q46. Hướng phát triển tiếp theo là gì?**
 
@@ -579,9 +605,9 @@ HEADLESS=0 python src/main.py
 3. **Test 1**: *"Bây giờ em phủ một mảnh khăn/giấy lên vùng mũi/miệng — sau 15 giây sẽ có thông báo 'Mũi/miệng bị che'."*
    → Đếm to thành tiếng "1, 2, 3..."
    → Telegram kêu, mở ra cho hội đồng xem
-4. **Test 2**: *"Tiếp em rời hẳn khung hình rồi quay lại — sau 15 giây không thấy ai sẽ có thông báo 'Không thấy ai trong khung'; nếu quay lại trước 15s thì KHÔNG có thông báo."*
-   → Bước ra khỏi khung ~8-10s (DƯỚI 15s), không có notification → quay lại, về SAFE
-   → ⚠️ *Lưu ý khi demo: nếu muốn show thông báo 'mất người', đứng ngoài khung > 15s — đây là thông báo sự việc bình thường, không phải lỗi. Nếu hội đồng hỏi, trả lời theo Q31.*
+4. **Test 2 (nhánh MẤT MẶT)**: *"Tiếp em che KÍN cả khuôn mặt (úp mặt xuống / lấy chăn trùm đầu) nhưng người vẫn trong khung — YOLO vẫn thấy thân người mà MediaPipe mất mặt. Sau `FACE_LOST_SEC` (15s) sẽ có thông báo 'KHÔNG THẤY MẶT BÉ — NGHI BỊ VÙI/CHE KÍN'."*
+   → Che mặt liên tục > 15s → Telegram kêu, mở ra cho hội đồng xem
+   → ⚠️ *Lưu ý: quay đầu/che mặt NGẮN (<15s) sẽ KHÔNG báo nhờ anti-flicker. Còn rời HẲN khung (không còn ai) chỉ ra trạng thái 'Không thấy ai' trên màn hình, KHÔNG gửi Telegram. Nếu hội đồng hỏi, trả lời theo Q30/Q31.*
 
 **3:00-4:00 — Highlight kỹ thuật**
 
@@ -623,7 +649,7 @@ Show slide tín hiệu skin-ratio, giải thích NGẮN:
 
 ### Điểm 4: Robust testing
 
-> *"Em có 52 unit test pass 100%. Đặc biệt test_clear_face_with_jitter_no_false_alert mô phỏng MediaPipe nhảy landmark ngẫu nhiên trên mặt sạch — verify rằng hệ thống KHÔNG báo nhầm dù landmark di chuyển vài pixel."*
+> *"Em có 67 unit test pass 100%. Đặc biệt test_clear_face_with_jitter_no_false_alert mô phỏng MediaPipe nhảy landmark ngẫu nhiên trên mặt sạch — verify rằng hệ thống KHÔNG báo nhầm dù landmark di chuyển vài pixel."*
 
 ### Điểm 5: Production-ready
 
@@ -638,7 +664,7 @@ Show slide tín hiệu skin-ratio, giải thích NGẮN:
 > *"Em thêm 3 lớp nâng chất lượng, đều rẻ CPU (~5ms, module `scene_monitor.py`):*
 > - *Blur-gate (giám sát độ nét toàn cục): khi cả khung mờ (autofocus hunting / motion blur ở FPS thấp), em dùng tín hiệu này để KHÔNG học baseline vào lúc đó và để cảnh báo điều kiện hiệu chỉnh kém — vì baseline mờ là baseline rác. Quyết định 'bị che' của detector chỉ dựa vào skin ratio nên vốn đã bền với mờ; blur-gate chủ yếu phục vụ chất lượng calibration + watchdog camera.*
 > - *Watchdog + heartbeat: thiết bị an toàn KHÔNG được fail âm thầm — em tự giám sát camera đơ / quá tối / FPS sụp và gửi cảnh báo 'giám sát suy giảm', cộng heartbeat định kỳ 'vẫn đang canh'.*
-> - *Thông báo khởi động: lúc bật máy, hệ thống gửi Telegram yêu cầu đưa mặt trẻ vào khung để hiệu chỉnh, nhắc lại nếu quên, và xác nhận khi đã bắt đầu giám sát — phòng trường hợp người dùng quên đặt trẻ/chỉnh camera mà tưởng đã được canh.*
+> - *Thông báo khởi động: lúc bật máy, hệ thống gửi Telegram báo 'đang quét tìm bé' (KHÔNG bắt người dùng thao tác đưa mặt vào — tự quét và tự hiệu chỉnh ngầm khi thấy mặt bé), nhắc lại nếu mãi chưa thấy bé, và xác nhận 'đã thấy bé — bắt đầu giám sát' khi xong — phòng trường hợp người dùng quên đặt trẻ/chỉnh camera mà tưởng đã được canh.*
 > - *Cổng chất lượng hiệu chỉnh: baseline là "định nghĩa mặt sạch" mà mọi lần phát hiện che về sau so sánh với, nên em CHỈ học baseline từ frame đủ sáng + không mờ. Nếu phòng quá tối / hình mờ kéo dài, vì máy chạy không màn hình nên em gửi Telegram hướng dẫn cụ thể (bật đèn / chỉnh tiêu cự) và chờ điều kiện tốt thay vì học một baseline rác — đây là cách em tăng độ tin cậy thực địa ngay từ khâu quan trọng nhất."*
 
 ---
@@ -672,7 +698,7 @@ Ví dụ:
 
 ### Câu khó 5: "Nếu trẻ úp mặt xuống nệm hoàn toàn thì sao?"
 
-✅ *"Em trả lời thẳng đây là hạn chế. Khi trẻ úp mặt, MediaPipe không thấy mũi/miệng nên detector KHÔNG đánh giá được vùng mũi/miệng → không tạo cảnh báo che cho tình huống này. Nếu YOLO vẫn thấy thân người thì hệ thống coi là 'còn người' và im lặng (không báo 'mất người'). Đây là giới hạn của cách tiếp cận camera + landmark; hướng khắc phục là thêm IR camera ban đêm và mở rộng tín hiệu phát hiện ở phiên bản sau. Em không phóng đại khả năng của hệ thống ở case này."*
+✅ *"Đây chính là ca nguy hiểm nhất và em xử lý bằng nhánh `FACE_LOST`. Khi trẻ úp mặt hoàn toàn, MediaPipe mất mũi/miệng nên detector so-màu-da không đánh giá được — NHƯNG nếu YOLO vẫn xác nhận còn người mà mặt biến mất quá `FACE_LOST_SEC`, hệ thống báo 'NGHI BỊ VÙI/CHE KÍN'. Phần khó là phân biệt với 'bé chỉ nằm nghiêng' — em giải bằng 3 lớp (§4.8): (1) BlazeFace bền góc nghiêng — mặt nghiêng vẫn thấy thì không báo; (2) head-pose — mất mặt khi đang xoay nghiêng thì báo nhẹ, mất khi còn chính diện thì nghi bị che → báo khẩn ngay; (3) leo thang — ca nằm nghiêng chỉ nhắc nhẹ, kéo dài mới báo khẩn. Em trả lời thẳng: ở góc cực hiếm/ban đêm cả 2 tầng phát hiện mặt vẫn có thể sai, nên em cho chỉnh ngưỡng và đề xuất IR cam + cảm biến hô hấp ở v6. Em không phóng đại khả năng của hệ thống."*
 
 ### Câu khó 6: "Cha mẹ ngủ thì sao? Alert có đánh thức không?"
 

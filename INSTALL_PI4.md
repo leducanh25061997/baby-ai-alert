@@ -321,7 +321,11 @@ TELEGRAM_CHAT_ID=<chat-id-cua-ban>
 | `YOLO_EVERY` | **`10`** | YOLO chạy mỗi N frame (phân biệt "bé úp mặt/quay đầu — còn người" vs "không còn ai"; giãn không hại độ nhạy) |
 | `HEADLESS` | `1` | `1`=không mở cửa sổ (Pi chạy không màn hình); `0` khi dev có HDMI |
 | `OCCLUSION_THRESHOLD_SEC` | `15` | Số giây mũi/miệng bị che liên tục → báo "Che mũi/miệng" |
-| `NO_PERSON_SEC` | `15` | Số giây không thấy ai trong khung liên tục → báo "Mất người" |
+| `NO_PERSON_SEC` | `15` | Số giây không thấy ai trong khung liên tục → trạng thái "Mất người" (chỉ hiển thị, KHÔNG gửi cảnh báo) |
+| `FACE_LOST_SEC` | `15` | Có người (YOLO xác nhận) nhưng **mất mặt** liên tục N giây → báo **"Mất mặt — nghi vùi/che kín"** (vá điểm mù: mặt úp hẳn vào nệm/chăn → mất landmark → detector skin không đọc được). `0`=tắt. **Cần YOLO bật.** |
+| `FACE_DETECT_CONF` | `0.5` | **Lớp 1 (BlazeFace)**: ngưỡng tin cậy của tầng phát hiện mặt phụ — bền với góc nghiêng hơn FaceMesh. Bé quay/nghiêng mà BlazeFace vẫn thấy mặt → KHÔNG tính mất mặt (giảm báo nhầm mạnh nhất). |
+| `FACE_LOST_PROFILE_YAW` | `0.55` | **Lớp 3 (head-pose)**: \|yaw\| (0=chính diện, →1 khi xoay hẳn) ngay trước khi mất mặt ≥ ngần này → coi là 'đang nằm nghiêng' → báo NHẸ; nhỏ hơn = mất khi còn chính diện → nghi bị che đột ngột → báo KHẨN ngay. |
+| `FACE_LOST_ESCALATE_SEC` | `30` | **Lớp 2 (leo thang)**: ca 'nằm nghiêng' nếu mất mặt kéo dài ≥ N giây thì nâng từ nhắc NHẸ lên cảnh báo KHẨN. |
 | `PRESENCE_HOLD_SEC` | `2.0` | Giữ trạng thái "có người" thêm N giây sau lần thấy mặt/người gần nhất → MediaPipe rớt track vài frame trên Pi 4 không bị hiểu thành "mất người" |
 | `CALIBRATION_SEC` | `5` | Thời gian calibrate baseline lúc khởi động |
 | `CONFIRM_FRAMES` | `10` | Tăng (15–20) → ổn định hơn, response chậm hơn chút |
@@ -334,8 +338,8 @@ TELEGRAM_CHAT_ID=<chat-id-cua-ban>
 | `HEALTH_DARK_LUMA` | `25` | Watchdog: độ sáng TB dưới mức này → cảnh báo "quá tối" |
 | `HEALTH_DEGRADE_SEC` | `20` | Sự cố kéo dài ≥ N giây mới cảnh báo (chống spam) |
 | `HEARTBEAT_SEC` | `0` (tắt) | Gửi Telegram "vẫn đang canh" mỗi N giây (vd `21600`=6h) |
-| `STARTUP_NOTIFY` | `1` (bật) | Lúc khởi động gửi Telegram yêu cầu đưa mặt trẻ vào khung + xác nhận khi hiệu chỉnh xong |
-| `CALIB_REMIND_SEC` | `60` | Nhắc lại "đưa mặt vào khung" mỗi N giây nếu mãi chưa hiệu chỉnh được |
+| `STARTUP_NOTIFY` | `1` (bật) | Lúc khởi động gửi Telegram báo "đang quét tìm bé" (KHÔNG còn yêu cầu thao tác đưa mặt) + xác nhận "đã thấy bé, bắt đầu giám sát" khi tự hiệu chỉnh xong |
+| `CALIB_REMIND_SEC` | `60` | Nhắc lại "vẫn chưa thấy bé, đang tiếp tục quét" mỗi N giây nếu mãi chưa thấy mặt bé |
 
 > 🚫 **Không có `YOLO_DEVICE`.** Project CPU-only, không hỗ trợ NVIDIA GPU. Pi 4 cũng không có NPU.
 > ⚠️ Đừng commit `.env` lên git (chứa token). Thêm `.env` vào `.gitignore`.
@@ -351,7 +355,7 @@ Chạy theo thứ tự, mỗi bước phải pass.
 cd ~/baby-ai-alert
 source venv/bin/activate
 
-python tests/test_state_machine.py        # Mong đợi: 🎉 11/11 test PASS
+python tests/test_state_machine.py        # Mong đợi: 🎉 17/17 test PASS
 python tests/test_occlusion_detector.py    # Mong đợi: 🎉 12/12 test PASS
 python tests/test_scene_monitor.py         # Mong đợi: 🎉 5/5 test PASS
 python tests/test_alert_policy.py          # Mong đợi: 🎉 13/13 test PASS
@@ -420,23 +424,33 @@ Nếu thấy `1280x720` → có ai đó set `CAMERA_WIDTH/HEIGHT` cao trong `.en
 
 ### 9.2 Test các kịch bản cảnh báo
 
-Hệ thống chỉ có **2 thông báo**: (1) **Che mũi/miệng** và (2) **Mất người**. Trạng thái nội bộ: `SAFE` / `COVERED` / `NO_PERSON`.
+Hệ thống có **2 cảnh báo gửi Telegram**: (1) **Che mũi/miệng** và (2) **Mất mặt (nghi vùi/che kín)**. Trạng thái **Mất người** (`NO_PERSON`) chỉ hiển thị/log, **KHÔNG** gửi cảnh báo. Trạng thái nội bộ: `SAFE` / `COVERED` / `FACE_LOST` / `NO_PERSON`.
 
 | # | Kịch bản | Kỳ vọng |
 |---|---|---|
 | 1 | **Mặt sạch ngồi yên 30s** | `skin` cao, state `SAFE`. KHÔNG alert. |
-| 2 | **Tay che mũi/miệng 15s+** | `skin` tụt mạnh (mất màu da) → state `COVERED`. Sau 15s → Telegram `🚨 MŨI/MIỆNG CỦA BÉ ĐANG BỊ CHE!` |
-| 3 | **Chăn/khăn che mũi/miệng 15s+** | `skin` tụt ngay (vật che không phải màu da) → `COVERED`. Sau 15s → cùng alert che mũi/miệng |
-| 4a | **Chưa đặt trẻ vào (khung trống) + YOLO không thấy người** | state `NO_PERSON`, đếm tới `NO_PERSON_SEC` |
-| 4b | **Rời khung NGẮN (<15s) rồi quay lại** | Nhờ `PRESENCE_HOLD_SEC` + chưa đủ `NO_PERSON_SEC` → KHÔNG gửi tin, về lại `SAFE` |
-| 4c | **Không thấy ai trong khung ≥15s** | state `NO_PERSON`. Sau `NO_PERSON_SEC` → Telegram `⚠️ KHÔNG THẤY AI TRONG KHUNG` |
-| 5 | **Bé úp mặt / quay đầu (mất mặt nhưng YOLO còn thấy người)** | KHÔNG báo "mất người" (vẫn còn người trong khung); cũng không tạo cảnh báo che mới vì không đọc được mũi/miệng |
+| 2 | **Tay che mũi/miệng 15s+** | `skin` tụt mạnh (mất màu da) → state `COVERED`. Sau `OCCLUSION_THRESHOLD_SEC` → Telegram `🚨 MŨI/MIỆNG CỦA BÉ ĐANG BỊ CHE!` |
+| 3 | **Chăn/khăn che mũi/miệng 15s+** | `skin` tụt ngay (vật che không phải màu da) → `COVERED`. Sau ngưỡng → cùng alert che mũi/miệng |
+| 4a | **Chưa đặt trẻ vào (khung trống) + YOLO không thấy người** | state `NO_PERSON`, đếm elapsed để hiển thị — **KHÔNG gửi cảnh báo** |
+| 4b | **Rời khung NGẮN (<`PRESENCE_HOLD_SEC`) rồi quay lại** | Nhờ `PRESENCE_HOLD_SEC` → vẫn coi "có người", về lại `SAFE`. KHÔNG gửi tin |
+| 4c | **Không thấy ai trong khung lâu** | state `NO_PERSON` (chỉ hiển thị). **KHÔNG** gửi Telegram |
+| 5 | **Bé úp mặt / mặt bị vùi, mất mặt khi còn ~chính diện (YOLO còn thấy người) ≥ `FACE_LOST_SEC`** | state `FACE_LOST`, manner=`covered` → Telegram `🚨 KHÔNG THẤY MẶT BÉ — NGHI BỊ VÙI/CHE KÍN!` (báo KHẨN ngay) |
+| 5b | **Bé quay đầu/nằm nghiêng nhưng BlazeFace vẫn thấy mặt** | **Lớp 1**: `face_visible=True` → coi như còn thấy mặt → `SAFE`, KHÔNG gửi tin (đây là ca giảm báo nhầm chính) |
+| 5c | **Bé nằm nghiêng đến mức cả BlazeFace cũng mất mặt** | **Lớp 3**: \|yaw\| trước khi mất ≥ `FACE_LOST_PROFILE_YAW` → manner=`turned` → tin **NHẸ** "không thấy rõ mặt bé, có thể nằm nghiêng — kiểm tra giúp"; **Lớp 2**: nếu kéo dài ≥ `FACE_LOST_ESCALATE_SEC` mới leo thang lên KHẨN |
+| 5d | **Quay đầu/nghiêng NGẮN (<`FACE_LOST_SEC`) rồi quay lại** | `FACE_LOST` đếm chưa đủ ngưỡng → anti-flicker đưa về `SAFE`, KHÔNG gửi tin |
 
-> ℹ️ **"Có người" = MediaPipe thấy mặt HOẶC YOLO thấy người**, và còn được **giữ thêm `PRESENCE_HOLD_SEC`** (mặc định 2s) sau lần thấy gần nhất. Nhờ vậy MediaPipe rớt track vài frame trên Pi 4 không bị hiểu nhầm thành "mất người". YOLO ở đây dùng để **phân biệt "bé úp mặt/quay đầu — còn người trong khung" với "không còn ai"**: nếu YOLO vẫn thấy người thì không báo "mất người" dù MediaPipe tạm mất mặt.
+> ℹ️ **"Có người" = thấy mặt (FaceMesh HOẶC BlazeFace) HOẶC YOLO thấy người**, giữ thêm `PRESENCE_HOLD_SEC` (mặc định 2s) sau lần thấy gần nhất → rớt track vài frame không bị hiểu nhầm.
+>
+> 🛡️ **3 lớp giảm báo nhầm khi bé nằm nghiêng/quay đầu** (chi tiết HUONG_DAN_BAO_VE §4.8):
+> - **Lớp 1 — BlazeFace fallback**: tầng phát hiện mặt phụ bền với góc nghiêng. Mặt nghiêng vẫn detect → KHÔNG tính mất mặt. Chỉ khi **CẢ FaceMesh lẫn BlazeFace** đều mất mặt mới đếm `FACE_LOST`. *(Giảm FP mạnh nhất.)*
+> - **Lớp 3 — head-pose**: dùng \|yaw\| ngay trước khi mất mặt để đoán nguyên nhân — *nằm nghiêng* (báo nhẹ) vs *bị che đột ngột khi còn chính diện* (báo khẩn).
+> - **Lớp 2 — leo thang**: ca 'nằm nghiêng' chỉ nhắc nhẹ; kéo dài quá `FACE_LOST_ESCALATE_SEC` mới lên cảnh báo khẩn → tránh làm phiền nhưng vẫn an toàn.
+>
+> ⚠️ **Nhánh `FACE_LOST` cần YOLO bật** (xác nhận còn người mới phân biệt "mặt bị vùi" với "bé rời khung"). BlazeFace dùng `mp.solutions.face_detection` (có sẵn trong mediapipe, không thêm dependency). Muốn tắt hẳn nhánh mất mặt: đặt `FACE_LOST_SEC=0`.
 >
 > "Che mũi/miệng" được quyết định **chỉ bằng skin-ratio drop** (vùng mũi/miệng mất màu da → có vật che). Histogram chỉ được tính để **log/hiển thị**, KHÔNG dùng để quyết định.
 
-Mỗi event lưu snapshot + `.json` ở lần cảnh báo ĐẦU: `events/face_covered_<timestamp>.jpg`/`.json` cho trường hợp che, `events/no_person_<timestamp>.jpg`/`.json` cho trường hợp mất người. Khi vẫn còn che / vẫn mất người → re-alert Telegram định kỳ (kèm ảnh mới) nhưng KHÔNG ghi thêm file trùng (tránh phình đĩa).
+Mỗi event lưu snapshot + `.json` ở lần cảnh báo ĐẦU: `events/face_covered_<timestamp>.jpg`/`.json` cho trường hợp che, `events/face_lost_<timestamp>.jpg`/`.json` cho trường hợp mất mặt. Khi tình huống còn kéo dài → re-alert Telegram định kỳ (kèm ảnh mới) nhưng KHÔNG ghi thêm file trùng (tránh phình đĩa).
 
 ### 9.3 Recalibration
 - **GUI mode** (có HDMI, `HEADLESS=0`): nhấn phím `R`.
@@ -533,7 +547,7 @@ Ba lớp logic nâng chất lượng/độ an toàn, đều rẻ CPU (~5ms/frame
 
 2. **Watchdog + heartbeat (BẬT sẵn, trừ heartbeat)** — tự giám sát để **không fail âm thầm**: camera ĐƠ (frame trùng) / phòng QUÁ TỐI / FPS quá thấp kéo dài ≥ `HEALTH_DEGRADE_SEC` → gửi `⚠️ GIÁM SÁT SUY GIẢM`, và báo `✅ Đã khôi phục` khi hết. Bật heartbeat định kỳ ("vẫn đang canh") bằng `HEARTBEAT_SEC` (vd 6h).
 
-3. **Thông báo khởi động / hiệu chỉnh (BẬT sẵn)** — lúc khởi động (kể cả autostart lúc boot) gửi Telegram **🟢 yêu cầu đưa mặt trẻ vào khung** để hiệu chỉnh; **nhắc lại** mỗi `CALIB_REMIND_SEC` nếu mãi chưa thấy mặt (vd quên chỉnh camera); và **✅ xác nhận "bắt đầu giám sát"** khi hiệu chỉnh xong (kèm cảnh báo nếu chất lượng thấp). → Người dùng không nhận được tin xác nhận = biết ngay hệ thống **chưa** giám sát. Tắt bằng `STARTUP_NOTIFY=0`.
+3. **Thông báo khởi động (BẬT sẵn)** — lúc khởi động (kể cả autostart lúc boot) gửi Telegram **🟢 "đang quét tìm bé"** — KHÔNG còn yêu cầu người dùng thao tác đưa mặt vào: hệ thống **tự quét**, tự hiệu chỉnh ngầm khi thấy mặt bé. **Nhắc lại** mỗi `CALIB_REMIND_SEC` nếu mãi chưa thấy bé (vd quên chỉnh camera); và **✅ xác nhận "đã thấy bé — bắt đầu giám sát"** khi tự hiệu chỉnh xong (kèm cảnh báo nếu chất lượng thấp). → Người dùng không nhận được tin xác nhận = biết ngay hệ thống **chưa** giám sát. Tắt bằng `STARTUP_NOTIFY=0`.
    > 🔍 **Cổng chất lượng hiệu chỉnh:** baseline là "định nghĩa mặt sạch" mà mọi lần phát hiện che về sau so sánh với — học từ frame **tối/mờ** sẽ ra baseline rác, kém tin cậy ngoài thực địa. Vì vậy pha hiệu chỉnh **chỉ gom mẫu từ frame ĐẠT** (độ sáng ≥ `HEALTH_DARK_LUMA`, không bị blur-gate). Nếu điều kiện kém kéo dài ≥ `CALIB_COND_GRACE_SEC` (mặc định 4s), hệ thống gửi Telegram **hướng dẫn cụ thể** ("phòng quá tối → bật đèn" / "hình mờ → chỉnh tiêu cự") và tiếp tục chờ điều kiện tốt thay vì học baseline kém.
 
 ---
@@ -680,7 +694,7 @@ Raspberry Pi 4 Model B (BCM2711, 4GB/8GB RAM)
 │   ├── requirements.txt          ← deps pinned (numpy<2, opencv<4.11, torch<2.4)
 │   ├── src/
 │   │   ├── main.py               ← entrypoint, 3 guard env, signal handlers
-│   │   ├── state_machine.py      ← FSM 3 trạng thái: SAFE / COVERED / NO_PERSON
+│   │   ├── state_machine.py      ← FSM 4 trạng thái: SAFE / COVERED / FACE_LOST / NO_PERSON
 │   │   └── occlusion_detector.py ← Phát hiện che bằng skin-ratio drop (hist chỉ để log)
 │   ├── scripts/
 │   │   ├── install_pi4.sh       ← One-shot install cho Pi 4 (ARM64 CPU-only)

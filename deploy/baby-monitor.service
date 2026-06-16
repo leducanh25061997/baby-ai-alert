@@ -31,10 +31,13 @@ WorkingDirectory=__PROJECT_DIR__
 # Prefix `-` = không fail nếu file không tồn tại (default đã hardcode trong code).
 EnvironmentFile=-__PROJECT_DIR__/.env
 
-# Chờ USB webcam enumerate xong trước khi start (camera hay chưa sẵn ngay lúc
-# boot). Chờ tối đa 30s cho /dev/video0; hết 30s vẫn start (app tự retry 60
-# frame rồi systemd restart). `exit 0` luôn để không chặn vòng restart.
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/video0 ] && exit 0; sleep 1; done; echo "[setup] /dev/video0 chua thay sau 30s, van start (app se retry)"; exit 0'
+# (TUỲ CHỌN) Chờ USB webcam enumerate trước khi start cho gọn log. Bước này
+# NON-FATAL: `exit 0` LUÔN trả về dù /dev/video0 chưa thấy sau 30s → KHÔNG chặn
+# process khởi động. App (src/main.py) tự quản lý mở camera với BACKOFF CÓ GIỚI
+# HẠN (_open_camera) và tự KẾT NỐI LẠI khi mất frame/unplug-replug — không phụ
+# thuộc vào ExecStartPre này, cũng không crash khi thiếu /dev/video*, permission
+# denied, hay camera bị app khác giữ. (Có thể bỏ hẳn dòng ExecStartPre nếu muốn.)
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/video0 ] && exit 0; sleep 1; done; echo "[setup] /dev/video0 chua thay sau 30s, van start (app tu reconnect)"; exit 0'
 
 ExecStart=__PYTHON__ __PROJECT_DIR__/src/main.py
 

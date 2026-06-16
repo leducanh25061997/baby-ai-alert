@@ -54,7 +54,9 @@ PYTHONIOENCODING=utf-8 python scripts/extract_features.py --dataset dataset --ou
 Script chạy MediaPipe + `OcclusionDetector` thật qua từng clip: hiệu chỉnh trên
 `calib` của session, rồi mỗi frame **thấy mặt** xuất 1 dòng gồm tín hiệu thô, phiếu,
 quyết định hiện tại, và **đặc trưng tương đối** (dành cho hướng B sau này) + nhãn.
-Frame mất mặt được bỏ qua (đó là đường "mất người", không thuộc bộ phát hiện che).
+Frame mất mặt được bỏ qua: harness này chỉ đánh giá bộ phát hiện **che mũi/miệng**
+(skin/histogram, cần thấy mặt). Việc "có người mà mất mặt" do nhánh `FACE_LOST` ở
+state machine xử lý, đánh giá riêng — không thuộc phạm vi harness này.
 
 Cần `cv2` + `mediapipe` (đã có trong requirements). Tuỳ chọn `--calib-sec`, `--mp-conf`.
 
